@@ -45,6 +45,8 @@ struct ToR1cs {
     zero: TermLc,
     one: TermLc,
     field: FieldT,
+    cs: Computation,
+    epoch_cache: TermMap<u8>,
 }
 
 impl ToR1cs {
@@ -52,6 +54,7 @@ impl ToR1cs {
         field: FieldT,
         public_inputs: FxHashSet<String>,
         random_inputs: FxHashSet<String>,
+        cs: Computation,
     ) -> Self {
         debug!("Starting R1CS back-end, field: {}", field);
         let r1cs = R1cs::new(field.clone());
@@ -67,6 +70,8 @@ impl ToR1cs {
             zero,
             one,
             field,
+            cs,
+            epoch_cache: TermMap::new(),
         }
     }
 
@@ -81,7 +86,7 @@ impl ToR1cs {
         public: bool,
         random: bool,
     ) -> TermLc {
-        let mut epoch = 0;
+        let mut epoch = extras::epoch(comp.clone(), &self.cs, &mut self.epoch_cache);
         // see if var belongs in epoch 1
         for random_var in &self.random_inputs {
             if extras::free_in(&random_var, comp.clone()) {
@@ -93,10 +98,7 @@ impl ToR1cs {
         // epoch number with signal
         // output is defining the computation the prover runs as a precompute
         let n = format!("{}_n{}", ctx, self.next_idx);
-        println!("n is {}", n);
-        if n == "return_n3" {
-            println!("return term: {:?}", comp);
-        }
+        //println!("n is {}", n);
         self.next_idx += 1;
         debug_assert!(matches!(check(&comp), Sort::Field(_)));
         self.r1cs.add_signal(n.clone(), comp.clone(), epoch);
@@ -106,9 +108,7 @@ impl ToR1cs {
             "Cannot have {} as private and random ... probably change this...",
             n
         );
-        println!("adding var {}", n);
         if public {
-            println!("it is public!");
             self.r1cs.publicize(&n);
         }
         if random {
@@ -944,7 +944,7 @@ pub fn to_r1cs(mut cs: Computation, modulus: FieldT) -> (R1cs<String>, ProverDat
         .map(ToOwned::to_owned)
         .collect();
     debug!("public inputs: {:?}", public_inputs);
-    let mut converter = ToR1cs::new(modulus, public_inputs, random_inputs);
+    let mut converter = ToR1cs::new(modulus, public_inputs, random_inputs, cs.clone());
     debug!(
         "Term count: {}",
         assertions

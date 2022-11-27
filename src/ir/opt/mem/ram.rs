@@ -108,6 +108,7 @@ fn cast_to_field(term: &Term, field: &circ_fields::FieldT) -> Term {
     match check(term) {
         Sort::Field(_) => term.clone(),
         Sort::BitVector(_) => term![Op::UbvToPf(field.clone()); term.clone()],
+        Sort::Bool => term![Op::UbvToPf(field.clone()); term![Op::BoolToBv; term.clone()]],
         _ => panic!("Cannot cast term of type {:?} to field!", check(term)),
     }
 }
@@ -131,7 +132,7 @@ pub struct Ram {
 
 impl Ram {
     fn new(id: usize, const_: Array) -> Self {
-        assert_eq!(const_.map.len(), 0);
+        //assert_eq!(const_.map.len(), 0, "Map? {:?}", const_.map);
         Ram {
             id,
             val_sort: const_.default.sort(),
@@ -141,14 +142,21 @@ impl Ram {
             init_val: *const_.default,
         }
     }
-    fn new_read(&mut self, idx: Term, computation: &mut Computation, read_value: Term) -> Term {
+    fn new_read(
+        &mut self,
+        idx: Term,
+        computation: &mut Computation,
+        read_value: Term,
+        epoch_cache: &mut TermMap<u8>,
+    ) -> Term {
         let val_name = format!("__ram_{}_{}", self.id, self.accesses.len());
         debug_assert_eq!(&check(&idx), &self.idx_sort);
+        let epoch = extras::epoch(read_value.clone(), computation, epoch_cache);
         let var = computation.new_var(
             &val_name,
             check(&read_value),
             Some(crate::ir::proof::PROVER_ID),
-            0, // TODO: correct?
+            epoch, // TODO: correct?
             false,
             Some(read_value),
         );
@@ -163,7 +171,7 @@ impl Ram {
         self.accesses.push(Access::new_write(idx, val, guard));
     }
 
-    fn sorted_by_index(&self, computation: &mut Computation) -> Ram {
+    fn sorted_by_index(&self, computation: &mut Computation, epoch_cache: &mut TermMap<u8>) -> Ram {
         let idx_terms: Vec<Term> = self
             .accesses
             .iter()
@@ -173,7 +181,7 @@ impl Ram {
         let empty_arr = leaf_term(Op::Const(Value::Array(Array::default(
             self.idx_sort.clone(),
             &self.val_sort,
-            self.accesses.len(),
+            self.size,
         ))));
         let val_array_term = self.accesses.iter().fold(
             empty_arr,
@@ -197,11 +205,21 @@ impl Ram {
             //    Some(crate::ir::proof::PROVER_ID),
             //    None,
             //);
+            let idx_epoch = extras::epoch(
+                term(Op::NthSmallest(i), idx_terms.clone()),
+                computation,
+                epoch_cache,
+            );
+            let val_epoch = extras::epoch(
+                term![Op::Select; val_array_term.clone(), term(Op::NthSmallest(i), idx_terms.clone())],
+                computation,
+                epoch_cache,
+            );
             let idx = computation.new_var(
                 &idx_name,
                 self.idx_sort.clone(),
                 Some(crate::ir::proof::PROVER_ID),
-                0, // TODO
+                idx_epoch, // TODO
                 false,
                 Some(term(Op::NthSmallest(i), idx_terms.clone())),
             );
@@ -209,7 +227,7 @@ impl Ram {
                 &val_name,
                 self.val_sort.clone(),
                 Some(crate::ir::proof::PROVER_ID),
-                0, // TODO
+                val_epoch, // TODO
                 false,
                 Some(
                     term![Op::Select; val_array_term.clone(), term(Op::NthSmallest(i), idx_terms.clone())],
@@ -367,7 +385,11 @@ impl ArrayGraph {
         match t.op {
             Op::Field(idx) => {
                 // recursively check if the field of t is a ram
-                self.is_ram_read(&t.cs[0].get().cs[idx])
+                if t.cs[0].get().cs.len() > idx {
+                    self.is_ram_read(&t.cs[0].get().cs[idx])
+                } else {
+                    false
+                }
             }
             _ => !t.is_const() && self.array_terms.contains(t) && !self.non_ram.contains(t),
         }
@@ -375,23 +397,25 @@ impl ArrayGraph {
 }
 
 #[derive(Debug)]
-struct Extactor {
+struct Extactor<'a> {
     rams: Vec<Ram>,
     term_ram: TermMap<RamId>,
     read_terms: TermMap<Term>,
     graph: ArrayGraph,
+    cache: &'a mut TermMap<u8>,
 }
 
 type RamId = usize;
 
-impl Extactor {
-    fn new(c: &Computation) -> Self {
+impl<'a> Extactor<'a> {
+    fn new(c: &Computation, cache: &'a mut TermMap<u8>) -> Self {
         let graph = ArrayGraph::new(c);
         Self {
             rams: Vec::new(),
             term_ram: TermMap::default(),
             read_terms: TermMap::default(),
             graph,
+            cache,
         }
     }
     // If this term is a constant array, start a new RAM. Otherwise, look this term up.
@@ -440,7 +464,7 @@ impl Extactor {
     }
 }
 
-impl RewritePass for Extactor {
+impl<'a> RewritePass for Extactor<'a> {
     fn visit<F: Fn() -> Vec<Term>>(
         &mut self,
         computation: &mut Computation,
@@ -484,7 +508,8 @@ impl RewritePass for Extactor {
                     }
                     let ram_id = self.get_or_start(&t.cs[0]);
                     let ram = &mut self.rams[ram_id];
-                    let read_value = ram.new_read(t.cs[1].clone(), computation, t.clone());
+                    let read_value =
+                        ram.new_read(t.cs[1].clone(), computation, t.clone(), self.cache);
                     self.read_terms.insert(t.clone(), read_value.clone());
                     Some(read_value)
                 }
@@ -494,13 +519,14 @@ impl RewritePass for Extactor {
     }
 }
 
-struct Encoder {
+struct Encoder<'a> {
     rams: Vec<Ram>,
+    cache: &'a mut TermMap<u8>,
 }
 
-impl Encoder {
-    fn new(rams: Vec<Ram>) -> Encoder {
-        Encoder { rams }
+impl<'a> Encoder<'a> {
+    fn new(rams: Vec<Ram>, cache: &mut TermMap<u8>) -> Encoder {
+        Encoder { rams, cache }
     }
 
     fn construct_permutation_check(ram1: &Ram, ram2: &Ram, alpha: Term, beta: Term) -> Term {
@@ -578,13 +604,13 @@ impl Encoder {
 
         // remove ram writes
         // TODO: This ONLY works for read-only rams.
-        for ram in self.rams.iter_mut() {
-            while !ram.accesses.is_empty()
-                && eval(&ram.accesses[0].is_write, &fxhash::FxHashMap::default()).as_bool()
-            {
-                ram.accesses.remove(0);
-            }
-        }
+        //for ram in self.rams.iter_mut() {
+        //    while !ram.accesses.is_empty()
+        //        && eval(&ram.accesses[0].is_write, &fxhash::FxHashMap::default()).as_bool()
+        //    {
+        //        ram.accesses.remove(0);
+        //    }
+        //}
 
         // remove rams that are empty
         // TODO: maybe throw a warning here?
@@ -617,7 +643,7 @@ impl Encoder {
         let mut checks = vec![];
         checks.push(computation.outputs()[0].clone());
         for ram in self.rams.iter() {
-            let sorted_ram = ram.sorted_by_index(computation);
+            let sorted_ram = ram.sorted_by_index(computation, self.cache);
             // TODO: better error handling
             // TODO: is there a cleaner way to get the field type?
             let sorted_check = Encoder::construct_sorted_check(&sorted_ram);
@@ -643,8 +669,8 @@ impl Encoder {
 /// * This pass doesn't handle shared stuff very well. If there are two
 ///   different RAMs with the same init sequence of instructions, this pass will
 ///   not extract **either**.
-pub fn extract(c: &mut Computation) -> Vec<Ram> {
-    let mut extractor = Extactor::new(c);
+pub fn extract(c: &mut Computation, cache: &mut TermMap<u8>) -> Vec<Ram> {
+    let mut extractor = Extactor::new(c, cache);
     extractor.traverse(c);
     extractor.rewrite_indices();
     println!("found {:?} rams", extractor.rams.len());
@@ -667,10 +693,10 @@ pub fn extract(c: &mut Computation) -> Vec<Ram> {
 /// NOTE: This is currently broken for any ram that:
 ///       1. doesn't do a single write, then only reads
 ///       2. doesn't access every single element in the ram
-pub fn encode(c: &mut Computation, rams: Vec<Ram>) {
+pub fn encode(c: &mut Computation, rams: Vec<Ram>, cache: &mut TermMap<u8>) {
     //println!("Pre-opt terms: {}", c.outputs[0].get().count_terms());
     //println!("got {}", c.outputs[0].get());
-    let mut encoder = Encoder::new(rams);
+    let mut encoder = Encoder::new(rams, cache);
     encoder.encode(c);
     //println!("got {}", c.outputs[0].get());
     //println!("Opt-done terms: {}", c.outputs[0].get().count_terms());
@@ -686,6 +712,7 @@ mod test {
             b"
             (computation
                 (metadata () () ())
+                (precompute () () (#t ))
                 (let
                     (
                         (c_array (#a (bv 4) #x0 4 ()))
@@ -710,6 +737,7 @@ mod test {
             b"
             (computation
                 (metadata () () ())
+                (precompute () () (#t ))
                 (let
                     (
                         (c_array (#a (bv 4) #b000 4 ()))
@@ -747,6 +775,7 @@ mod test {
             b"
             (computation
                 (metadata () ((a bool)) ())
+                (precompute () () (#t ))
                 (let
                     (
                         (c_array (#a (bv 4) #b000 4 ()))
@@ -785,6 +814,7 @@ mod test {
             b"
             (computation
                 (metadata () ((a bool)) ())
+                (precompute () () (#t ))
                 (let
                     (
                         (c_array (#a (bv 4) #b000 4 ()))
@@ -824,6 +854,7 @@ mod test {
             b"
             (computation
                 (metadata () ((a bool)) ())
+                (precompute () () (#t ))
                 (let
                     (
                         ; connected component 0: simple store chain

@@ -67,7 +67,6 @@ pub fn verify_proof<'a, E: MultiMillerLoop>(
     // or equivalently:
     // A * B + inputs * (-gamma) + C * (-delta) = alpha * beta
     // which allows us to do a single final exponentiation.
-
     if pvk.alpha_g1_beta_g2
         == E::multi_miller_loop(&[
             (&proof.a, &proof.b.into()),

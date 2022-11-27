@@ -142,7 +142,7 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
 
         let mut vars = HashMap::with_capacity(self.r1cs.next_idx);
         for epoch in 0..num_epochs {
-            println!("at epoch {} of {}", epoch, num_epochs);
+            //println!("at epoch {} of {}", epoch, num_epochs);
             // compute the witnesses for this epoch
             if let Some(precomp) = self.precomp {
                 let mut precomp_restricted = precomp.clone();
@@ -160,23 +160,18 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
                 if let Some(s) = self.r1cs.idxs_signals.get(&i) {
                     // skip unused variables
                     if uses.get(&i).is_none() {
-                        println!("drop dead var: {}", s);
+                        //println!("drop dead var: {}", s);
                         continue;
                     }
                     if *self.r1cs.signal_epochs.get(s).unwrap() != epoch as u8 {
-                        println!("skipping var not in this epoch {:?} {}", i, s);
+                        //println!("skipping var not in this epoch {:?} {}", i, s);
                         continue;
                     }
                     if self.r1cs.random_idxs.contains(&i) {
-                        println!("skipping public coin {}", s);
+                        //println!("skipping public coin {}", s);
                         continue;
                     }
 
-                    println!(
-                        "adding var {} epoch {}",
-                        s,
-                        *self.r1cs.signal_epochs.get(s).unwrap()
-                    );
                     let name_f = || s.to_string();
                     let val_f = || {
                         Ok({
@@ -187,7 +182,7 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
                         })
                     };
                     let public = self.r1cs.public_idxs.contains(&i);
-                    println!("var: {}, public: {}", s, public);
+                    //println!("var: {}, public: {}", s, public);
                     let v = if public {
                         cs.alloc_input(name_f, val_f)?
                     } else {
@@ -206,7 +201,6 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
                         vars.insert(*i, coin_var);
                         if let Some(ref mut value_map) = values {
                             let input_name = self.r1cs.signal_to_term.get(s).unwrap();
-                            println!("adding coin: {}", input_name);
                             value_map.insert(
                                 input_name.clone(),
                                 Value::Field(FieldV::new(ff_to_int(coin), f_mod_arc.clone())),
@@ -271,9 +265,67 @@ where
         precomp: &None,
         epochs: &p_data.epochs,
     };
+    println!("generating parameters...");
     let p = generate_random_parameters::<E, _, _>(synth_input, rng).unwrap();
+    println!("writing proving key..");
     write_prover_key_and_data(pk_path, &p, p_data)?;
+    println!("writing verifier key..");
     write_verifier_key_and_data(vk_path, &p.vk, v_data)?;
+    Ok(())
+}
+
+pub fn oneshot<E: Engine + MultiMillerLoop>(
+    prover_data: &ProverData,
+    verifier_data: &VerifierData,
+    inputs_map: &FxHashMap<String, Value>,
+) -> io::Result<()>
+where
+    E::Fr: PrimeFieldBits,
+    E::G1: WnafGroup,
+    E::G2: WnafGroup,
+{
+    let rng = &mut rand::thread_rng();
+    let synth_input = SynthInput {
+        r1cs: &prover_data.r1cs,
+        input_map: &None,
+        precomp: &None,
+        epochs: &prover_data.epochs,
+    };
+    let p = generate_random_parameters::<E, _, _>(synth_input, rng).unwrap();
+
+    // we will compute in 2 rounds
+    // each precompute input will have its epoch...
+    //println!("precomp inputs: {:?}", prover_data.precompute_inputs);
+    //println!("random coins: {:?}", prover_data.random_coins);
+    for (input, (sort, epoch)) in &prover_data.precompute_inputs {
+        if *epoch == 0 && !prover_data.random_coins.contains(input) {
+            let value = inputs_map
+                .get(input)
+                .unwrap_or_else(|| panic!("No input for {}", input));
+            let sort2 = value.sort();
+            assert_eq!(
+                sort, &sort2,
+                "Sort mismatch for {}. Expected\n\t{} but got\n\t{}",
+                input, sort, sort2
+            );
+        }
+    }
+
+    //let new_map = prover_data.precompute.eval(inputs_map);
+    //prover_data.r1cs.check_all(&new_map);
+    //println!("prover epochs: {:?}", prover_data.epochs);
+    let synth_input = SynthInput {
+        r1cs: &prover_data.r1cs,
+        input_map: &Some(inputs_map.clone()),
+        precomp: &Some(prover_data.precompute.clone()),
+        epochs: &prover_data.epochs,
+    };
+    let pf = create_random_proof(synth_input, &p, rng).unwrap();
+
+    let pvk = prepare_verifying_key(&p.vk);
+    let inputs = verifier_data.eval(inputs_map);
+    let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
+    verify_proof(&pvk, &pf, &inputs_as_ff).unwrap();
     Ok(())
 }
 
@@ -324,7 +376,7 @@ fn read_verifier_key_and_data<P: AsRef<Path>, E: Engine>(
 /// * a proof path, and
 /// * a prover input map
 /// generate a random proof and writes it to the path
-pub fn prove<E: Engine, P1: AsRef<Path>, P2: AsRef<Path>>(
+pub fn prove<E: Engine + pairing::MultiMillerLoop, P1: AsRef<Path>, P2: AsRef<Path>>(
     pk_path: P1,
     pf_path: P2,
     inputs_map: &FxHashMap<String, Value>,

@@ -111,7 +111,6 @@ pub fn compute_coin<E: Engine, S: PrimeField>(inputs: &[S], pid: E::G1Affine, nu
 
     use group::GroupEncoding;
 
-    println!("coin inputs are: {:?}", inputs);
     let num_bits = num.to_be_bytes();
     // TODO: need to put in Pid in here...
     let sha_input = [&inputs_bits, pid.to_bytes().as_ref(), &num_bits[..]].concat();
@@ -124,7 +123,6 @@ pub fn compute_coin<E: Engine, S: PrimeField>(inputs: &[S], pid: E::G1Affine, nu
     //let coin =
     //from_u8s(&res).unwrap()
     let res = S::random(&mut rng);
-    println!("coin is: {:?}", res);
     res
 }
 
@@ -289,7 +287,7 @@ pub fn create_random_proof<E, C, R, P: ParameterSource<E>>(
     mut rng: &mut R,
 ) -> Result<Proof<E>, SynthesisError>
 where
-    E: Engine,
+    E: Engine + pairing::MultiMillerLoop,
     E::Fr: PrimeFieldBits,
     C: RandomCircuit<E::Fr>,
     R: RngCore,
@@ -310,7 +308,7 @@ pub fn create_proof<E, C, P: ParameterSource<E>>(
     _t: E::Fr,
 ) -> Result<Proof<E>, SynthesisError>
 where
-    E: Engine,
+    E: Engine + pairing::MultiMillerLoop,
     E::Fr: PrimeFieldBits,
     C: RandomCircuit<E::Fr>,
 {
@@ -400,13 +398,14 @@ where
         multiexp(&worker, params.get_h(a.len())?, FullDensity, a)
     };
 
-    println!("nonrand aux: {:?}", prover.nonrand_aux_assignment);
-    println!("rand aux: {:?}", prover.rand_aux_assignment);
+    //println!("nonrand aux: {:?}", prover.nonrand_aux_assignment);
+    //println!("rand aux: {:?}", prover.rand_aux_assignment);
 
     // TODO: parallelize if it's even helpful
     let input_assignment = Arc::new(
         prover
             .input_assignment
+            .clone()
             .into_iter()
             .map(|s| s.into())
             .collect::<Vec<_>>(),
@@ -441,14 +440,14 @@ where
         aux_nonrand_assignment.clone(),
     );
 
-    println!("ok2");
+    //println!("ok2");
     let l = multiexp(
         &worker,
         params.get_l(aux_assignment.len() - prover.num_nonrandom)?,
         FullDensity,
         aux_rand_assignment.clone(),
     );
-    println!("ok3");
+    //println!("ok3");
 
     let a_aux_density_total = prover.a_aux_density.get_total_density();
 
@@ -541,12 +540,13 @@ where
 
     AddAssign::<&E::G1>::add_assign(&mut g_d, &j.wait()?);
     //AddAssign::<&E::G1>::add_assign(&mut g_d, &j.wait()?);
-
-    Ok(Proof {
+    //
+    let proof = Proof {
         a: g_a.to_affine(),
         b: g_b.to_affine(),
         c: g_c.to_affine(),
         d: g_d.to_affine(),
         //coins,
-    })
+    };
+    return Ok(proof);
 }

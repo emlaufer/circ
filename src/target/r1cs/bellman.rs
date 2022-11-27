@@ -28,11 +28,11 @@ use super::*;
 fn int_to_ff<F: PrimeField>(i: Integer) -> F {
     let mut accumulator = F::from(0);
     let limb_bits = (std::mem::size_of::<limb_t>() as u64) << 3;
-    let limb_base = F::from(2).pow_vartime(&[limb_bits]);
+    let limb_base = F::from(2).pow_vartime([limb_bits]);
     // as_ref yeilds a least-significant-first array.
     for digit in i.as_ref().iter().rev() {
         accumulator *= limb_base;
-        accumulator += F::from(*digit as u64);
+        accumulator += F::from(*digit);
     }
     accumulator
 }
@@ -183,6 +183,45 @@ where
     let p = generate_random_parameters::<E, _, _>(SynthInput(&p_data.r1cs, &None), rng).unwrap();
     write_prover_key_and_data(pk_path, &p, p_data)?;
     write_verifier_key_and_data(vk_path, &p.vk, v_data)?;
+    Ok(())
+}
+
+pub fn oneshot<E: Engine + MultiMillerLoop>(
+    prover_data: &ProverData,
+    verifier_data: &VerifierData,
+    inputs_map: &FxHashMap<String, Value>,
+) -> io::Result<()>
+where
+    E::Fr: PrimeFieldBits,
+    E::G1: WnafGroup,
+    E::G2: WnafGroup,
+{
+    let rng = &mut rand::thread_rng();
+    let p =
+        generate_random_parameters::<E, _, _>(SynthInput(&prover_data.r1cs, &None), rng).unwrap();
+
+    // what we will do is compute in rounds 2 rounds
+    // each precompute input will have its epoch...
+    //
+    for (input, (sort, _epoch)) in &prover_data.precompute_inputs {
+        let value = inputs_map
+            .get(input)
+            .unwrap_or_else(|| panic!("No input for {}", input));
+        let sort2 = value.sort();
+        assert_eq!(
+            sort, &sort2,
+            "Sort mismatch for {}. Expected\n\t{} but got\n\t{}",
+            input, sort, sort2
+        );
+    }
+    let new_map = prover_data.precompute.eval(inputs_map);
+    prover_data.r1cs.check_all(&new_map);
+    let pf = create_random_proof(SynthInput(&prover_data.r1cs, &Some(new_map)), &p, rng).unwrap();
+
+    let pvk = prepare_verifying_key(&p.vk);
+    let inputs = verifier_data.eval(inputs_map);
+    let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
+    verify_proof(&pvk, &pf, &inputs_as_ff).unwrap();
     Ok(())
 }
 

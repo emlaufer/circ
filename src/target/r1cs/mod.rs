@@ -5,7 +5,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use log::debug;
 use paste::paste;
 use rug::Integer;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::hash_map::Entry;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -19,6 +19,8 @@ pub mod marlin;
 #[cfg(feature = "r1cs")]
 pub mod mirage;
 pub mod opt;
+#[cfg(feature = "r1cs")]
+pub mod spartan;
 pub mod trans;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,8 +34,29 @@ pub struct R1cs<S: Hash + Eq> {
     public_idxs: HashSet<usize>,
     random_idxs: HashSet<usize>,
     constraints: Vec<(Lc, Lc, Lc)>,
+    #[serde(
+        deserialize_with = "deserialize_term_vec",
+        serialize_with = "serialize_term_vec"
+    )]
     terms: Vec<Term>,
     signal_to_term: HashMap<S, String>,
+}
+
+// serde requires a specific signature here.
+#[allow(clippy::ptr_arg)]
+fn serialize_term_vec<S>(ts: &Vec<Term>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    term(Op::Tuple, ts.clone()).serialize(s)
+}
+
+fn deserialize_term_vec<'de, D>(d: D) -> Result<Vec<Term>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let tuple: Term = Deserialize::deserialize(d)?;
+    Ok(tuple.cs.clone())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +89,11 @@ impl Lc {
     }
     /// Is this a constant? If so, return that constant.
     pub fn as_const(&self) -> Option<&FieldV> {
-        self.monomials.is_empty().then_some(&self.constant)
+        if self.monomials.is_empty() {
+            Some(&self.constant)
+        } else {
+            None
+        }
     }
 
     /// Does it have any of the keys in `set`
@@ -434,17 +461,14 @@ impl R1cs<String> {
             }
         });
 
-        println!("public_idxs: {:?}", self.public_idxs);
         let pf_input_order: Vec<String> = (0..self.next_idx)
             .filter(|i| self.public_idxs.contains(i) && !self.random_idxs.contains(i))
             .map(|i| self.idxs_signals.get(&i).cloned().unwrap())
             .collect();
-        println!("pf input order: {:?}", pf_input_order);
         let pf_input_order_alt: Vec<String> = (0..self.next_idx)
             .filter(|i| self.public_idxs.contains(i))
             .map(|i| self.idxs_signals.get(&i).cloned().unwrap())
             .collect();
-        println!("alternate: {:?}", pf_input_order_alt);
         let mut precompute_inputs = HashMap::default();
         for input in &pf_input_order {
             if let Some(output_term) = precompute.outputs().get(input) {
@@ -480,6 +504,8 @@ impl R1cs<String> {
             .collect();
         println!("Random coins are: {:?}", random_coins);
 
+        // TODO: something is broken where we aren't removing inputs from
+        //       pf_input_order that are optimized out...
         // TODO: gross...
         let max_epoch = all_inputs.values().max().unwrap();
         let mut epochs = vec![HashSet::<String>::default(); *max_epoch as usize + 1];
@@ -488,7 +514,7 @@ impl R1cs<String> {
                 return;
             }
             // GROSS::::::::::::::::::::::::::::::::::::::::::::::::::::;
-            for e in 0..*epoch + 1 {
+            for e in *epoch..2 {
                 epochs[e as usize].insert(input.to_string());
             }
         });
@@ -551,14 +577,6 @@ pub struct VerifierData {
 impl VerifierData {
     /// Given verifier inputs, compute a vector of integers to feed to the proof system.
     pub fn eval(&self, value_map: &HashMap<String, Value>) -> Vec<rug::Integer> {
-        println!("random coins are: {:?}", self.random_coins);
-        println!(
-            "precomp outputs are: {:?}",
-            self.precompute.outputs().keys()
-        );
-        println!("expected inputs are: {:?}", self.precompute.inputs());
-        println!("expected inputs2 are: {:?}", self.precompute_inputs);
-        println!("my inputs are: {:?}", value_map);
         for (input, (sort, _epoch)) in &self.precompute_inputs {
             if !self.random_coins.contains(input) {
                 let value = value_map
@@ -573,7 +591,6 @@ impl VerifierData {
             }
         }
         let new_map = self.precompute.eval(value_map);
-        println!("end map is: {:?}", new_map);
         self.pf_input_order
             .iter()
             .map(|input| {

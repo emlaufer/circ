@@ -98,7 +98,6 @@ impl<Scalar: PrimeField> ConstraintSystem<Scalar> for KeypairAssembly<Scalar> {
         // There is no assignment, so we don't even invoke the
         // function for obtaining one.
         //
-        println!("allocating input: {}", a().into());
 
         let index = self.num_inputs;
         self.num_inputs += 1;
@@ -192,7 +191,6 @@ impl<Scalar: PrimeField> RandomConstraintSystem<Scalar> for KeypairAssembly<Scal
         if self.coins_done {
             return Err(SynthesisError::LateRandomCoin);
         }
-        println!("allocating coin: {}", annotation().into());
 
         let index = self.num_inputs;
         self.coin_inds.push(index);
@@ -363,7 +361,7 @@ where
     let mut a = vec![E::G1Affine::identity(); assembly.num_inputs + assembly.num_aux];
     let mut b_g1 = vec![E::G1Affine::identity(); assembly.num_inputs + assembly.num_aux];
     let mut b_g2 = vec![E::G2Affine::identity(); assembly.num_inputs + assembly.num_aux];
-    println!("gerator: {}", assembly.num_inputs);
+    //println!("gerator: {}", assembly.num_inputs);
     let mut ic = vec![E::G1Affine::identity(); assembly.num_inputs];
     // l only contains non-random indices
     // j has all random ones
@@ -552,7 +550,6 @@ where
         &worker,
     );
     //}
-    println!("ok");
 
     // Don't allow any elements be unconstrained, so that
     // the L query is always fully dense.

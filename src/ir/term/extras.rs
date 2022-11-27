@@ -138,6 +138,76 @@ pub fn free_in(v: &str, t: Term) -> bool {
     false
 }
 
+pub fn epoch(t: Term, cs: &Computation, cache: &mut TermMap<u8>) -> u8 {
+    // TODO: add support for more than 2 epochs
+    //let mut has_rand = false;
+    //for n in PostOrderIter::new(t) {
+    //    match &n.op {
+    //        Op::Var(name, _) => {
+    //            let meta = cs.metadata.input_vis.get(name);
+    //            if let Some(meta) = meta {
+    //                if meta.random || meta.epoch != 0 {
+    //                    has_rand = true;
+    //                    break;
+    //                }
+    //            }
+    //        }
+    //        _ => {}
+    //    }
+    //}
+
+    //if has_rand {
+    //    1
+    //} else {
+    //    0
+    //}
+    // (children pushed, term)
+    let mut stack = vec![(false, t.clone())];
+    while let Some((children_pushed, node)) = stack.pop() {
+        if cache.contains_key(&node) {
+            continue;
+        }
+        if children_pushed {
+            let self_e1 = if node.cs.is_empty() {
+                match &node.op {
+                    Op::Var(name, _) => {
+                        let meta = cs.metadata.input_vis.get(name);
+                        if let Some(meta) = meta {
+                            if meta.random || meta.epoch != 0 {
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            let children_e1 = if node.cs.iter().any(|c| *cache.get(c).unwrap_or(&0) != 0) {
+                true
+            } else {
+                false
+            };
+            let epoch = if self_e1 || children_e1 { 1 } else { 0 };
+            cache.insert(node, epoch);
+        } else {
+            stack.push((true, node.clone()));
+            for c in &node.cs {
+                // vs doubles as our visited set.
+                if !cache.contains_key(c) {
+                    stack.push((false, c.clone()));
+                }
+            }
+        }
+    }
+    *cache.get(&t).unwrap()
+}
+
 /// Get all the free variables in this term
 pub fn free_variables(t: Term) -> FxHashSet<String> {
     PostOrderIter::new(t)

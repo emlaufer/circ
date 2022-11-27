@@ -1,13 +1,13 @@
 #![allow(unused_imports)]
 #[cfg(feature = "r1cs")]
-use bellman_proof::gadgets::test::TestConstraintSystem;
+use bellman::gadgets::test::TestConstraintSystem;
 #[cfg(feature = "r1cs")]
-use bellman_proof::groth16::{
+use bellman::groth16::{
     create_random_proof, generate_parameters, generate_random_parameters, prepare_verifying_key,
     verify_proof, Parameters, Proof, VerifyingKey,
 };
 #[cfg(feature = "r1cs")]
-use bellman_proof::Circuit;
+use bellman::Circuit;
 use bls12_381::{Bls12, Scalar};
 #[cfg(feature = "c")]
 use circ::front::c::{self, C};
@@ -28,8 +28,10 @@ use circ::target::aby::trans::to_aby;
 #[cfg(feature = "lp")]
 use circ::target::ilp::{assignment_to_values, trans::to_ilp};
 #[cfg(feature = "r1cs")]
-use circ::target::r1cs::bellman::{gen_params, prove, verify};
+use circ::target::r1cs::bellman::{gen_params, oneshot};
 use circ::target::r1cs::opt::reduce_linearities;
+#[cfg(feature = "r1cs")]
+use circ::target::r1cs::spartan::write_data;
 use circ::target::r1cs::trans::to_r1cs;
 
 #[cfg(feature = "marlin")]
@@ -125,6 +127,8 @@ enum Backend {
         action: ProofAction,
         #[structopt(long, default_value = "groth")]
         proof_system: ProofSystem,
+        #[structopt(long, default_value = "in", parse(from_os_str))]
+        inputs: PathBuf,
     },
     Smt {},
     Ilp {},
@@ -164,6 +168,8 @@ arg_enum! {
     enum ProofAction {
         Count,
         Setup,
+        SpartanSetup,
+        Oneshot,
     }
 }
 
@@ -265,6 +271,8 @@ fn main() {
                     Opt::Sha,
                     Opt::ConstantFold(Box::new(ignore.clone())),
                     Opt::Flatten,
+                    // Function calls return tuples
+                    Opt::Tuple,
                     Opt::Obliv,
                     // The obliv elim pass produces more tuples, that must be eliminated
                     Opt::Tuple,
@@ -313,17 +321,38 @@ fn main() {
             verifier_key,
             lc_elimination_thresh,
             proof_system,
+            inputs,
             ..
         } => {
             println!("Converting to r1cs");
-            let (r1cs, mut prover_data, verifier_data) = to_r1cs(cs, FieldT::from(DFL_T.modulus()));
+            let (r1cs, mut prover_data, verifier_data) =
+                to_r1cs(cs.get("main").clone(), FieldT::from(DFL_T.modulus()));
+
             println!("Pre-opt R1cs size: {}", r1cs.constraints().len());
             let r1cs = reduce_linearities(r1cs, Some(lc_elimination_thresh));
+
             println!("Final R1cs size: {}", r1cs.constraints().len());
             // save the optimized r1cs: the prover needs it to synthesize.
             prover_data.r1cs = r1cs;
             match action {
                 ProofAction::Count => (),
+                ProofAction::Oneshot => {
+                    println!("Running oneshot proof for {}", proof_system);
+                    match proof_system {
+                        ProofSystem::Groth => {
+                            let input_map = parse_value_map(&std::fs::read(inputs).unwrap());
+                            oneshot::<Bls12>(&prover_data, &verifier_data, &input_map).unwrap();
+                            println!("Success!");
+                        }
+                        ProofSystem::Mirage => {
+                            let input_map = parse_value_map(&std::fs::read(inputs).unwrap());
+                            mirage::oneshot::<Bls12>(&prover_data, &verifier_data, &input_map)
+                                .unwrap();
+                            println!("Success!");
+                        }
+                        _ => {}
+                    }
+                }
                 ProofAction::Setup => {
                     println!("Generating Parameters for proof system {}", proof_system);
                     match proof_system {
@@ -369,6 +398,10 @@ fn main() {
                         }
                     }
                 }
+                ProofAction::SpartanSetup => {
+                    write_data::<_, _>(prover_key, verifier_key, &prover_data, &verifier_data)
+                        .unwrap();
+                }
             }
         }
         #[cfg(not(feature = "r1cs"))]
@@ -393,12 +426,14 @@ fn main() {
         Backend::Ilp { .. } => {
             println!("Converting to ilp");
             let inputs_and_sorts: HashMap<_, _> = cs
+                .get("main")
+                .clone()
                 .metadata
                 .input_vis
                 .iter()
                 .map(|(name, (sort, _))| (name.clone(), check(sort)))
                 .collect();
-            let ilp = to_ilp(cs);
+            let ilp = to_ilp(cs.get("main").clone());
             let solver_result = ilp.solve(default_solver);
             let (max, vars) = solver_result.expect("ILP could not be solved");
             println!("Max value: {}", max.round() as u64);
@@ -417,8 +452,9 @@ fn main() {
         #[cfg(feature = "smt")]
         Backend::Smt { .. } => {
             if options.frontend.lint_prim_rec {
-                assert_eq!(cs.outputs.len(), 1);
-                match find_model(&cs.outputs[0]) {
+                let main_comp = cs.get("main").clone();
+                assert_eq!(main_comp.outputs.len(), 1);
+                match find_model(&main_comp.outputs[0]) {
                     Some(m) => {
                         println!("Not primitive recursive!");
                         for (var, val) in m {

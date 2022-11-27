@@ -1,12 +1,14 @@
 //! The C front-end
 
 mod ast_utils;
+pub mod cvisit;
 mod parser;
 mod term;
 mod types;
 
 use super::{FrontEnd, Mode};
-use crate::circify::{Circify, Loc, Val};
+use crate::circify::mem::AllocId;
+use crate::circify::{CircError, Circify, Loc, Val};
 use crate::front::c::ast_utils::*;
 use crate::front::c::term::*;
 use crate::front::c::types::*;
@@ -18,7 +20,8 @@ use lang_c::ast::*;
 use lang_c::span::Node;
 use log::debug;
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::path::PathBuf;
 
@@ -37,13 +40,26 @@ pub struct C;
 
 impl FrontEnd for C {
     type Inputs = Inputs;
-    fn gen(i: Inputs) -> Computation {
+    fn gen(i: Inputs) -> Computations {
         let parser = parser::CParser::new();
         let p = parser.parse_file(&i.file).unwrap();
         let mut g = CGen::new(i.mode, p.unit);
         g.visit_files();
         g.entry_fn("main");
-        g.circ.consume().borrow().clone()
+        let mut cs = Computations::new();
+        let main_comp = g.circify().consume().borrow().clone();
+        cs.comps.insert("main".to_string(), main_comp);
+        while !g.function_queue.is_empty() {
+            let call_term = g.function_queue.pop().unwrap();
+            if let Op::Call(name, arg_sorts, rets) = &call_term.op {
+                g.fn_call(name, arg_sorts, rets);
+                let comp = g.circify().consume().borrow().clone();
+                cs.comps.insert(name.to_string(), comp);
+            } else {
+                panic!("Non-call term added to function queue.");
+            }
+        }
+        cs
     }
 }
 
@@ -74,31 +90,42 @@ impl CLoc {
 }
 
 struct CGen {
-    circ: Circify<Ct>,
+    circ: RefCell<Circify<Ct>>,
     mode: Mode,
     tu: TranslationUnit,
     structs: HashMap<String, Ty>,
     functions: HashMap<String, FnInfo>,
     typedefs: HashMap<String, Ty>,
+    function_queue: Vec<Term>,
+    function_cache: HashSet<Op>,
+    ret_ty: Option<Ty>,
 }
 
 impl CGen {
     fn new(mode: Mode, tu: TranslationUnit) -> Self {
         let this = Self {
-            circ: Circify::new(Ct::new()),
+            circ: RefCell::new(Circify::new(Ct::new())),
             mode,
             tu,
             structs: HashMap::default(),
             functions: HashMap::default(),
             typedefs: HashMap::default(),
+            function_queue: Vec::new(),
+            function_cache: HashSet::new(),
+            ret_ty: None,
         };
         this.circ
+            .borrow()
             .cir_ctx()
             .cs
             .borrow_mut()
             .metadata
             .add_prover_and_verifier();
         this
+    }
+
+    fn circify(&self) -> Circify<Ct> {
+        self.circ.replace(Circify::new(Ct::new()))
     }
 
     /// Unwrap a result of an error and abort
@@ -286,12 +313,16 @@ impl CGen {
         res
     }
 
-    pub fn get_param_info(&mut self, decl: &ParameterDeclaration, v: bool) -> ParamInfo {
+    pub fn get_param_info(&mut self, decl: &ParameterDeclaration) -> ParamInfo {
         let mut vis: Option<PartyId> = None;
         let base_ty: Option<Ty>;
-        if v {
-            vis = interpret_visibility(&decl.specifiers[0].node, self.mode);
-            base_ty = self.d_type_(&decl.specifiers[1..]);
+        if !decl.specifiers.is_empty() {
+            if let DeclarationSpecifier::Extension(_) = &decl.specifiers[0].node {
+                vis = interpret_visibility(&decl.specifiers[0].node, self.mode);
+                base_ty = self.d_type_(&decl.specifiers[1..]);
+            } else {
+                base_ty = self.d_type_(&decl.specifiers);
+            }
         } else {
             base_ty = self.d_type_(&decl.specifiers);
         }
@@ -313,12 +344,14 @@ impl CGen {
             Some(args) => args.to_vec(),
             None => vec![],
         };
+
+        let params = args.iter().map(|a| self.get_param_info(a)).collect();
         let body = body_from_func(fn_def);
 
         FnInfo {
             name,
             ret_ty,
-            args,
+            params,
             body,
         }
     }
@@ -360,8 +393,8 @@ impl CGen {
                 let i = id.unwrap_or_else(|| panic!("Unknown AllocID: {:#?}", array));
                 let inner_ty = ty.inner_ty();
                 Ok(cterm(match inner_ty {
-                    Ty::Bool => CTermData::CBool(self.circ.load(i, idx)),
-                    Ty::Int(s, w) => CTermData::CInt(s, w, self.circ.load(i, idx)),
+                    Ty::Bool => CTermData::CBool(self.circ_load(i, idx)),
+                    Ty::Int(s, w) => CTermData::CInt(s, w, self.circ_load(i, idx)),
                     _ => unimplemented!(),
                 }))
             }
@@ -370,8 +403,8 @@ impl CGen {
                 let inner_ty = ty.inner_ty();
                 let new_offset = term![BV_ADD; offset, idx];
                 Ok(cterm(match inner_ty {
-                    Ty::Bool => CTermData::CBool(self.circ.load(i, new_offset)),
-                    Ty::Int(s, w) => CTermData::CInt(s, w, self.circ.load(i, new_offset)),
+                    Ty::Bool => CTermData::CBool(self.circ_load(i, new_offset)),
+                    Ty::Int(s, w) => CTermData::CInt(s, w, self.circ_load(i, new_offset)),
                     _ => unimplemented!(),
                 }))
             }
@@ -388,10 +421,10 @@ impl CGen {
         match (array.clone().term, idx.clone().term) {
             (CTermData::CArray(ty, id), CTermData::CInt(_, _, idx_term)) => {
                 let i = id.unwrap_or_else(|| panic!("Unknown AllocID: {:#?}", array.clone()));
-                let vals = val.term.terms(self.circ.cir_ctx());
+                let vals = val.term.terms(self.circ.borrow().cir_ctx());
                 for (o, v) in vals.iter().enumerate() {
                     let updated_idx = term![BV_ADD; idx_term.clone(), bv_lit(o as i32, 32)];
-                    self.circ.store(i, updated_idx, v.clone());
+                    self.circ_store(i, updated_idx, v.clone());
                 }
                 if vals.len() > 1 {
                     Ok(cterm(CTermData::CArray(ty, id)))
@@ -401,11 +434,11 @@ impl CGen {
             }
             (CTermData::CStackPtr(ty, offset, id), CTermData::CInt(_, _, idx_term)) => {
                 let i = id.unwrap_or_else(|| panic!("Unknown AllocID: {:#?}", array.clone()));
-                let vals = val.term.terms(self.circ.cir_ctx());
+                let vals = val.term.terms(self.circ.borrow().cir_ctx());
                 for (o, v) in vals.iter().enumerate() {
                     let updated_idx =
                         term![BV_ADD; idx_term.clone(), offset.clone(), bv_lit(o as i32, 32)];
-                    self.circ.store(i, updated_idx, v.clone());
+                    self.circ_store(i, updated_idx, v.clone());
                 }
                 if vals.len() > 1 {
                     Ok(cterm(CTermData::CArray(ty, id)))
@@ -434,6 +467,9 @@ impl CGen {
         }
     }
 
+    // clippy doesn't like that self is only used in recursion
+    // allowing so this can remain an associated function
+    #[allow(clippy::only_used_in_recursion)]
     fn base_loc(&self, loc: CLoc) -> CLoc {
         match loc {
             CLoc::Var(_) => loc,
@@ -490,30 +526,40 @@ impl CGen {
 
     fn gen_assign(&mut self, loc: CLoc, val: CTerm) -> Result<CTerm, String> {
         match loc {
-            CLoc::Var(l) => Ok(self
-                .circ
-                .assign(l, Val::Term(val))
-                .map_err(|e| format!("{}", e))?
-                .unwrap_term()),
+            CLoc::Var(l) => {
+                let org_type = self
+                    .circ_get_value(l.clone())
+                    .map_err(|e| format!("{}", e))?
+                    .unwrap_term()
+                    .term
+                    .type_();
+                let new_type = val.term.type_();
+                // unsigned type casting
+                let new_val = match (&org_type, &new_type) {
+                    (Ty::Int(sa, _), Ty::Int(sb, _)) if sa != sb => cast(Some(org_type), val),
+                    (_, _) => val,
+                };
+                Ok(self
+                    .circ_assign(l, Val::Term(new_val))
+                    .map_err(|e| format!("{}", e))?
+                    .unwrap_term())
+            }
             CLoc::Idx(l, idx) => {
                 let old_inner: CTerm = match *l {
                     CLoc::Var(inner_loc) => self
-                        .circ
-                        .get_value(inner_loc)
+                        .circ_get_value(inner_loc)
                         .map_err(|e| format!("{}", e))?
                         .unwrap_term(),
                     CLoc::Member(inner_loc, field) => {
                         let base = self
-                            .circ
-                            .get_value(inner_loc.loc().clone())
+                            .circ_get_value(inner_loc.loc().clone())
                             .map_err(|e| format!("{}", e))?
                             .unwrap_term();
                         self.field_select(&base, &field).unwrap()
                     }
                     CLoc::Idx(inner_loc, idx) => {
                         let base = self
-                            .circ
-                            .get_value(inner_loc.loc().clone())
+                            .circ_get_value(inner_loc.loc().clone())
                             .map_err(|e| format!("{}", e))?
                             .unwrap_term();
                         self.array_select(&base, &idx).unwrap()
@@ -524,16 +570,14 @@ impl CGen {
             CLoc::Member(l, field) => {
                 let inner_loc = l.loc().clone();
                 let base = self
-                    .circ
-                    .get_value(inner_loc.clone())
+                    .circ_get_value(inner_loc.clone())
                     .map_err(|e| format!("{}", e))?
                     .unwrap_term();
                 let old_inner = self.field_select(&base, &field)?;
                 let new_inner = self.rebuild_lval(old_inner, *l, val)?;
                 let res = self.field_store(&base, &field, &new_inner);
                 Ok(self
-                    .circ
-                    .assign(inner_loc, Val::Term(res.unwrap()))
+                    .circ_assign(inner_loc, Val::Term(res.unwrap()))
                     .map_err(|e| format!("{}", e))?
                     .unwrap_term())
             }
@@ -541,7 +585,7 @@ impl CGen {
     }
 
     fn fold_(&mut self, expr: &CTerm) -> i32 {
-        let term_ = fold(&expr.term.term(self.circ.cir_ctx()), &[]);
+        let term_ = fold(&expr.term.term(self.circ.borrow().cir_ctx()), &[]);
         let cterm_ = cterm(CTermData::CInt(true, 32, term_));
         let val = const_int(cterm_);
         val.to_i32().unwrap()
@@ -645,7 +689,7 @@ impl CGen {
         if let Ty::Array(_, sizes, _) = base_ty {
             let mut total = 1;
             for (i, ind) in index.indices.iter().rev().enumerate() {
-                let index_term = ind.term.term(self.circ.cir_ctx());
+                let index_term = ind.term.term(self.circ.borrow().cir_ctx());
                 let size = sizes[i] as i32;
                 if i == 0 {
                     offset = term![BV_ADD; index_term, offset];
@@ -656,7 +700,7 @@ impl CGen {
             }
         } else {
             assert!(index.indices.len() == 1);
-            let index_term = index.indices[0].term.term(self.circ.cir_ctx());
+            let index_term = index.indices[0].term.term(self.circ.borrow().cir_ctx());
             offset = index_term;
         }
         offset
@@ -665,7 +709,7 @@ impl CGen {
     fn gen_expr(&mut self, expr: &Expression) -> CTerm {
         let res = match &expr {
             Expression::Identifier(node) => Ok(self
-                .unwrap(self.circ.get_value(Loc::local(node.node.name.clone())))
+                .unwrap(self.circ_get_value(Loc::local(node.node.name.clone())))
                 .unwrap_term()),
             Expression::Constant(node) => Ok(self.const_(&node.node)),
             Expression::BinaryOperator(node) => {
@@ -726,7 +770,7 @@ impl CGen {
                         // TODO: fix hack, const int check for shifting
                         match bin_op.operator.node {
                             BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight => {
-                                let b_t = fold(&b.term.term(self.circ.cir_ctx()), &[]);
+                                let b_t = fold(&b.term.term(self.circ.borrow().cir_ctx()), &[]);
                                 b = cterm(CTermData::CInt(true, 32, b_t));
                                 f(a, b)
                             }
@@ -782,45 +826,67 @@ impl CGen {
                     .unwrap_or_else(|| panic!("No function '{}'", fname))
                     .clone();
 
-                let FnInfo {
-                    name,
-                    ret_ty,
-                    args: parameters,
-                    body,
-                } = f;
+                // Add return ty
+                self.ret_ty_put(f.ret_ty.clone());
 
-                // Add parameters
+                // parameter sorts
+                let param_sorts = f.params.iter().map(|p| p.ty.sort()).collect::<Vec<_>>();
+
+                // parameters
                 let args = arguments
                     .iter()
                     .map(|e| self.gen_expr(&e.node))
                     .collect::<Vec<_>>();
+                assert_eq!(f.params.len(), args.len());
+                let mut args_map: HashMap<String, CTerm> = HashMap::new();
+                for (p, c) in f.params.iter().zip(args.iter()) {
+                    args_map.insert(p.name.clone(), c.clone());
+                }
+                let arg_terms = args
+                    .iter()
+                    .map(|a| a.term.terms(self.circ.borrow().cir_ctx()))
+                    .collect::<Vec<_>>();
+                let flatten_args = arg_terms.clone().into_iter().flatten().collect::<Vec<_>>();
 
-                // setup stack frame for entry function
-                self.circ.enter_fn(name, ret_ty.clone());
-                assert_eq!(parameters.len(), args.len());
+                // return sort
+                let (rets, ret_sort) = get_fn_return_sort(&f, &arg_terms);
 
-                for (p, a) in parameters.iter().zip(args) {
-                    let param_info = self.get_param_info(p, false);
-                    let r = self.circ.declare_init(
-                        param_info.name.clone(),
-                        param_info.ty,
-                        Val::Term(a),
-                    );
-                    self.unwrap(r);
+                let call_term = term(
+                    Op::Call(f.name.clone(), param_sorts, ret_sort),
+                    flatten_args,
+                );
+
+                // Add function to queue
+                if !self.function_cache.contains(&call_term.op) {
+                    self.function_cache.insert(call_term.op.clone());
+                    self.function_queue.push(call_term.clone());
                 }
 
-                self.gen_stmt(&body);
-
-                let ret = self
-                    .circ
-                    .exit_fn()
-                    .map(|a| a.unwrap_term())
-                    .unwrap_or_else(|| cterm(CTermData::CBool(bool_lit(false))));
-
-                match ret_ty {
-                    None => Ok(ret),
-                    _ => Ok(cast(ret_ty, ret)),
+                // Rewiring
+                for (ret_name, sort) in rets.iter() {
+                    if let Sort::Array(_, _, _) = sort {
+                        if args_map.contains_key(ret_name) {
+                            let ct = args_map.get(ret_name).unwrap();
+                            if let CTermData::CArray(_, id) = ct.term {
+                                self.circ_replace(id.unwrap(), call_term.clone());
+                            } else {
+                                panic!("This should only be handling ptrs to arrays");
+                            }
+                        }
+                    }
                 }
+
+                // Return value
+                let ret = match f.ret_ty {
+                    None => cterm(CTermData::CBool(term![Op::Field(0); call_term])),
+                    Some(Ty::Bool) => cterm(CTermData::CBool(term![Op::Field(0); call_term])),
+                    Some(Ty::Int(sign, width)) => {
+                        cterm(CTermData::CInt(sign, width, term![Op::Field(0); call_term]))
+                    }
+                    _ => unimplemented!("Unimplemented return type: {:?}", f.ret_ty),
+                };
+
+                Ok(ret)
             }
             Expression::Member(member) => {
                 let MemberExpression {
@@ -862,20 +928,18 @@ impl CGen {
                         values.push(expr);
                     }
                     assert!(n == values.len());
-                    let id = self
-                        .circ
-                        .zero_allocate(values.len(), 32, inner_type.num_bits());
+                    let id = self.circ_zero_allocate(values.len(), 32, inner_type.num_bits());
 
                     for (i, v) in values.iter().enumerate() {
                         let offset = bv_lit(i, 32);
-                        let v_ = v.term.term(self.circ.cir_ctx());
-                        self.circ.store(id, offset, v_);
+                        let v_ = v.term.term(self.circ.borrow().cir_ctx());
+                        self.circ_store(id, offset, v_);
                     }
                     cterm(CTermData::CArray(ty.clone(), Some(id)))
                 }
                 Ty::Struct(_base, fs) => {
                     assert!(fs.len() == l.len());
-                    ty.default(self.circ.cir_ctx())
+                    ty.default(self.circ.borrow().cir_ctx())
                 }
                 _ => unreachable!("Initializer list for non-list type: {:#?}", l),
             },
@@ -905,10 +969,9 @@ impl CGen {
                 let expr: CTerm = if let Some(init) = d.node.initializer.clone() {
                     self.gen_init(&info.ty, &init.node)
                 } else {
-                    info.ty.default(self.circ.cir_ctx())
+                    info.ty.default(self.circ.borrow().cir_ctx())
                 };
-
-                let res = self.circ.declare_init(
+                let res = self.circ_declare_init(
                     info.name.clone(),
                     info.ty.clone(),
                     Val::Term(cast(Some(info.ty.clone()), expr.clone())),
@@ -1011,30 +1074,27 @@ impl CGen {
             }
             Statement::If(node) => {
                 let cond = self.gen_expr(&node.node.condition.node);
-                let t_res = self
-                    .circ
-                    .enter_condition(cond.term.term(self.circ.cir_ctx()));
-                self.unwrap(t_res);
+                let cond_term = cond.term.term(self.circ.borrow().cir_ctx());
+                self.circ_enter_condition(cond_term.clone());
                 self.gen_stmt(&node.node.then_statement.node);
-                self.circ.exit_condition();
+                self.circ_exit_condition();
                 if let Some(f_cond) = &node.node.else_statement {
-                    let f_res = self
-                        .circ
-                        .enter_condition(term!(Op::Not; cond.term.term(self.circ.cir_ctx())));
-                    self.unwrap(f_res);
+                    self.circ_enter_condition(term!(Op::Not; cond_term));
                     self.gen_stmt(&f_cond.node);
-                    self.circ.exit_condition();
+                    self.circ_exit_condition();
                 }
             }
             Statement::Return(ret) => {
                 match ret {
                     Some(expr) => {
                         let ret = self.gen_expr(&expr.node);
-                        let ret_res = self.circ.return_(Some(ret));
+                        let ret_ty = self.ret_ty_take();
+                        let new_ret = cast(ret_ty, ret);
+                        let ret_res = self.circ_return_(Some(new_ret));
                         self.unwrap(ret_res);
                     }
                     None => {
-                        let ret_res = self.circ.return_(None);
+                        let ret_res = self.circ_return_(None);
                         self.unwrap(ret_res);
                     }
                 };
@@ -1047,18 +1107,18 @@ impl CGen {
             },
             Statement::For(for_stmt) => {
                 // TODO: Add enter_breakable
-                self.circ.enter_scope();
+                self.circ_enter_scope();
                 let const_iters = self.get_const_iters(&for_stmt.node);
                 // TODO: Loop 5 times if const not specified
                 let bound = const_iters.val;
 
                 for _ in 0..bound {
-                    self.circ.enter_scope();
+                    self.circ_enter_scope();
                     self.gen_stmt(&for_stmt.node.statement.node);
-                    self.circ.exit_scope();
+                    self.circ_exit_scope();
                     self.gen_expr(&for_stmt.node.step.as_ref().unwrap().node);
                 }
-                self.circ.exit_scope();
+                self.circ_exit_scope();
             }
             // TODO: add while loop
             _ => unimplemented!("Statement {:#?} hasn't been implemented", stmt),
@@ -1074,29 +1134,26 @@ impl CGen {
             .unwrap_or_else(|| panic!("No function '{}'", n))
             .clone();
 
-        // setup stack frame for entry function
-        self.circ.enter_fn(f.name.to_owned(), f.ret_ty.clone());
+        // Add return ty
+        self.ret_ty_put(f.ret_ty.clone());
 
-        for arg in f.args.iter() {
-            let param_info = self.get_param_info(arg, true);
-            let r = self.circ.declare_input(
-                param_info.name.clone(),
-                &param_info.ty,
-                param_info.vis,
-                None,
-                true,
-            );
+        // setup stack frame for entry function
+        self.circ_enter_fn(f.name.to_owned(), f.ret_ty.clone());
+
+        for p in f.params.iter() {
+            let r = self.circ_declare_input(p.name.clone(), &p.ty, p.vis, None, false);
             self.unwrap(r);
         }
 
         self.gen_stmt(&f.body);
 
-        if let Some(r) = self.circ.exit_fn() {
+        if let Some(r) = self.circ_exit_fn() {
             match self.mode {
                 Mode::Mpc(_) => {
                     let ret_term = r.unwrap_term();
-                    let ret_terms = ret_term.term.terms(self.circ.cir_ctx());
+                    let ret_terms = ret_term.term.terms(self.circ.borrow().cir_ctx());
                     self.circ
+                        .borrow()
                         .cir_ctx()
                         .cs
                         .borrow_mut()
@@ -1108,14 +1165,76 @@ impl CGen {
                     let name = "return".to_owned();
                     let term = r.unwrap_term();
                     let r2 = self
-                        .circ
-                        .declare_input(name, ty, PROVER_VIS, None, false)
+                        .circ_declare_input(name, ty, PROVER_VIS, None, false)
                         .unwrap();
-                    self.circ.assert(eq(term, r2).unwrap().term.simple_term());
+                    self.circ
+                        .borrow_mut()
+                        .assert(eq(term, r2).unwrap().term.simple_term());
                     unimplemented!();
                 }
                 _ => unimplemented!("Mode: {}", self.mode),
             }
+        }
+    }
+
+    fn fn_call(&mut self, name: &String, arg_sorts: &Vec<Sort>, rets: &Sort) {
+        debug!("Call: {}", name);
+
+        // Get function types
+        let f = self
+            .functions
+            .get(name)
+            .unwrap_or_else(|| panic!("No function '{}'", name))
+            .clone();
+
+        // setup stack frame for function call
+        self.circ_enter_fn(name.to_owned(), f.ret_ty);
+
+        // Keep track of the names of arguments that are references
+        let mut ret_names: Vec<String> = Vec::new();
+
+        // define input parameters
+        assert!(arg_sorts.len() == f.params.len());
+        for (i, param) in f.params.iter().enumerate() {
+            let p_name = &param.name;
+            let p_sort = param.ty.sort();
+            assert!(p_sort == arg_sorts[i]);
+            let p_ty = match &param.ty {
+                Ty::Ptr(_, t) => {
+                    if let Sort::Array(_, _, len) = p_sort {
+                        let dims = vec![len];
+                        // Add reference
+                        ret_names.push(p_name.clone());
+                        Ty::Array(len, dims, t.clone())
+                    } else {
+                        panic!("Ptr type does not match with Array sort: {}", p_sort)
+                    }
+                }
+                _ => param.ty.clone(),
+            };
+            let r = self.circ_declare_input(p_name.to_string(), &p_ty, None, None, false);
+            self.unwrap(r);
+        }
+
+        self.gen_stmt(&f.body);
+
+        if let Some(returns) = self.circ_exit_fn_call(&ret_names) {
+            let ret_terms = returns
+                .into_iter()
+                .flat_map(|x| x.unwrap_term().term.terms(self.circ.borrow().cir_ctx()))
+                .collect::<Vec<Term>>();
+
+            let ret_term = term(Op::Tuple, ret_terms);
+
+            assert!(check(&ret_term) == *rets);
+
+            self.circ
+                .borrow()
+                .cir_ctx()
+                .cs
+                .borrow_mut()
+                .outputs
+                .push(ret_term);
         }
     }
 
@@ -1134,5 +1253,93 @@ impl CGen {
                 _ => unimplemented!("Haven't implemented node: {:?}", n.node),
             };
         }
+    }
+
+    fn ret_ty_put(&mut self, ret_ty: Option<Ty>) {
+        self.ret_ty = ret_ty;
+    }
+
+    fn ret_ty_take(&self) -> Option<Ty> {
+        self.ret_ty.clone()
+    }
+
+    fn circ_assign(&self, loc: Loc, val: Val<CTerm>) -> Result<Val<CTerm>, CircError> {
+        self.circ.borrow_mut().assign(loc, val)
+    }
+
+    fn circ_load(&self, i: AllocId, idx: Term) -> Term {
+        self.circ.borrow_mut().load(i, idx)
+    }
+
+    fn circ_store(&self, i: AllocId, idx: Term, v: Term) {
+        self.circ.borrow_mut().store(i, idx, v)
+    }
+
+    fn circ_replace(&self, i: AllocId, v: Term) {
+        self.circ.borrow_mut().replace(i, v)
+    }
+
+    fn circ_zero_allocate(&self, size: usize, addr_width: usize, val_width: usize) -> AllocId {
+        self.circ
+            .borrow_mut()
+            .zero_allocate(size, addr_width, val_width)
+    }
+
+    fn circ_get_value(&self, loc: Loc) -> Result<Val<CTerm>, CircError> {
+        self.circ.borrow().get_value(loc)
+    }
+
+    fn circ_declare_input(
+        &self,
+        name: String,
+        ty: &Ty,
+        vis: Option<PartyId>,
+        precomputed_value: Option<CTerm>,
+        mangle_name: bool,
+    ) -> Result<CTerm, CircError> {
+        self.circ
+            .borrow_mut()
+            .declare_input(name, ty, vis, precomputed_value, mangle_name)
+    }
+
+    fn circ_declare_init(
+        &self,
+        name: String,
+        ty: Ty,
+        val: Val<CTerm>,
+    ) -> Result<Val<CTerm>, CircError> {
+        self.circ.borrow_mut().declare_init(name, ty, val)
+    }
+
+    fn circ_enter_condition(&self, cond: Term) {
+        self.circ.borrow_mut().enter_condition(cond).unwrap();
+    }
+
+    fn circ_exit_condition(&self) {
+        self.circ.borrow_mut().exit_condition()
+    }
+
+    fn circ_return_(&self, ret: Option<CTerm>) -> Result<(), CircError> {
+        self.circ.borrow_mut().return_(ret)
+    }
+
+    fn circ_enter_fn(&self, f_name: String, ret_ty: Option<Ty>) {
+        self.circ.borrow_mut().enter_fn(f_name, ret_ty)
+    }
+
+    fn circ_exit_fn(&self) -> Option<Val<CTerm>> {
+        self.circ.borrow_mut().exit_fn()
+    }
+
+    fn circ_exit_fn_call(&self, ret_names: &Vec<String>) -> Option<Vec<Val<CTerm>>> {
+        self.circ.borrow_mut().exit_fn_call(ret_names)
+    }
+
+    fn circ_enter_scope(&self) {
+        self.circ.borrow_mut().enter_scope()
+    }
+
+    fn circ_exit_scope(&self) {
+        self.circ.borrow_mut().exit_scope()
     }
 }

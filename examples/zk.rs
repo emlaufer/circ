@@ -1,6 +1,7 @@
 use bls12_381::Bls12;
 use circ::ir::term::text::parse_value_map;
-use circ::target::r1cs::bellman::{prove, verify};
+use circ::target::r1cs::bellman;
+use circ::target::r1cs::spartan;
 use std::path::PathBuf;
 use structopt::clap::arg_enum;
 use structopt::StructOpt;
@@ -34,6 +35,10 @@ struct Options {
     proof: PathBuf,
     #[structopt(long, default_value = "in", parse(from_os_str))]
     inputs: PathBuf,
+    #[structopt(long, default_value = "pin", parse(from_os_str))]
+    pin: PathBuf,
+    #[structopt(long, default_value = "vin", parse(from_os_str))]
+    vin: PathBuf,
     #[structopt(long)]
     action: ProofAction,
     #[structopt(long, default_value = "groth")]
@@ -42,9 +47,12 @@ struct Options {
 
 arg_enum! {
     #[derive(PartialEq, Debug)]
+    /// `Prove`/`Verify` execute proving/verifying in bellman separately
+    /// `Spartan` executes both proving/verifying in spartan
     enum ProofAction {
         Prove,
         Verify,
+        //Spartan,
     }
 }
 
@@ -63,16 +71,17 @@ fn main() {
         .format_timestamp(None)
         .init();
     let opts = Options::from_args();
-    let input_map = parse_value_map(&std::fs::read(opts.inputs).unwrap());
     match opts.action {
         ProofAction::Prove => {
             println!("Proving ({})", opts.proof_system);
             match opts.proof_system {
                 ProofSystem::Groth => {
-                    prove::<Bls12, _, _>(opts.prover_key, opts.proof, &input_map).unwrap();
+                    let input_map = parse_value_map(&std::fs::read(opts.inputs).unwrap());
+                    bellman::prove::<Bls12, _, _>(opts.prover_key, opts.proof, &input_map).unwrap();
                 }
                 #[cfg(feature = "marlin")]
                 ProofSystem::Marlin => {
+                    let input_map = parse_value_map(&std::fs::read(opts.inputs).unwrap());
                     marlin::prove::<
                         BlsFr,
                         MarlinKZG10<Bls12_381, DensePolynomial<BlsFr>>,
@@ -88,6 +97,7 @@ fn main() {
                 }
                 #[cfg(feature = "mirage")]
                 ProofSystem::Mirage => {
+                    let input_map = parse_value_map(&std::fs::read(opts.inputs).unwrap());
                     mirage::prove::<Bls12, _, _>(opts.prover_key, opts.proof, &input_map).unwrap();
                 }
                 #[cfg(not(feature = "mirage"))]
@@ -100,10 +110,13 @@ fn main() {
             println!("Verifying ({})", opts.proof_system);
             match opts.proof_system {
                 ProofSystem::Groth => {
-                    verify::<Bls12, _, _>(opts.verifier_key, opts.proof, &input_map).unwrap();
+                    let input_map = parse_value_map(&std::fs::read(opts.inputs).unwrap());
+                    bellman::verify::<Bls12, _, _>(opts.verifier_key, opts.proof, &input_map)
+                        .unwrap();
                 }
                 #[cfg(feature = "marlin")]
                 ProofSystem::Marlin => {
+                    let input_map = parse_value_map(&std::fs::read(opts.inputs).unwrap());
                     marlin::verify::<
                         BlsFr,
                         MarlinKZG10<Bls12_381, DensePolynomial<BlsFr>>,
@@ -119,6 +132,7 @@ fn main() {
                 }
                 #[cfg(feature = "mirage")]
                 ProofSystem::Mirage => {
+                    let input_map = parse_value_map(&std::fs::read(opts.inputs).unwrap());
                     mirage::verify::<Bls12, _, _>(opts.verifier_key, opts.proof, &input_map)
                         .unwrap();
                 }
