@@ -1704,9 +1704,7 @@ fn eval_value(vs: &mut TermMap<Value>, h: &FxHashMap<String, Value>, c: Term) ->
 
         Op::NthSmallest(i) => {
             let mut xs: Vec<Value> = c.cs.iter().map(|c| vs.get(c).unwrap().clone()).collect();
-            xs.sort();
-            let res = xs[*i].clone();
-            res
+            order_stat::kth(&mut xs, *i).clone()
         }
         o => unimplemented!("eval: {:?}", o),
     };

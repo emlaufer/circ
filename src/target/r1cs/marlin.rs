@@ -302,11 +302,12 @@ pub fn verify<
 ) -> Result<(), Box<dyn Error>> {
     let (vk, verifier_data) = read_verifier_key_and_data::<_, F, PC>(vk_path)?;
     let rng = &mut rand::thread_rng();
+    panic!();
     //let pvk = prepare_verifying_key(&vk);
-    let inputs = verifier_data.eval(inputs_map);
-    let inputs_as_ff: Vec<F> = inputs.into_iter().map(int_to_ff).collect();
-    let mut pf_file = File::open(pf_path).unwrap();
-    let pf = Proof::deserialize(&mut pf_file).unwrap();
-    Marlin::<F, PC, FS>::verify(&vk, &inputs_as_ff, &pf, rng).unwrap();
+    //let inputs = verifier_data.eval(inputs_map);
+    //let inputs_as_ff: Vec<F> = inputs.into_iter().map(int_to_ff).collect();
+    //let mut pf_file = File::open(pf_path).unwrap();
+    //let pf = Proof::deserialize(&mut pf_file).unwrap();
+    //Marlin::<F, PC, FS>::verify(&vk, &inputs_as_ff, &pf, rng).unwrap();
     Ok(())
 }

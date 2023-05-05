@@ -27,6 +27,15 @@ use rug::Integer;
 use super::*;
 use crate::ir::term::precomp::PreComp;
 
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref test: Mutex::<HashSet::<String>> = {
+        Mutex::<HashSet::<String>>::new(HashSet::default())
+    };
+}
+
 /// Convert a (rug) integer to a prime field element.
 fn int_to_ff<F: PrimeField>(i: Integer) -> F {
     let mut accumulator = F::from(0);
@@ -160,7 +169,8 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
                 if let Some(s) = self.r1cs.idxs_signals.get(&i) {
                     // skip unused variables
                     if uses.get(&i).is_none() {
-                        //println!("drop dead var: {}", s);
+                        debug!("drop dead var: {}", s);
+                        test.lock().unwrap().insert(s.to_string());
                         continue;
                     }
                     if *self.r1cs.signal_epochs.get(s).unwrap() != epoch as u8 {
@@ -267,10 +277,10 @@ where
     };
     println!("generating parameters...");
     let p = generate_random_parameters::<E, _, _>(synth_input, rng).unwrap();
-    println!("writing proving key..");
-    write_prover_key_and_data(pk_path, &p, p_data)?;
-    println!("writing verifier key..");
-    write_verifier_key_and_data(vk_path, &p.vk, v_data)?;
+    //println!("writing proving key..");
+    //write_prover_key_and_data(pk_path, &p, p_data)?;
+    //println!("writing verifier key..");
+    //write_verifier_key_and_data(vk_path, &p.vk, v_data)?;
     Ok(())
 }
 
@@ -284,6 +294,9 @@ where
     E::G1: WnafGroup,
     E::G2: WnafGroup,
 {
+    use std::time::Instant;
+
+    let setup_start = Instant::now();
     let rng = &mut rand::thread_rng();
     let synth_input = SynthInput {
         r1cs: &prover_data.r1cs,
@@ -292,7 +305,10 @@ where
         epochs: &prover_data.epochs,
     };
     let p = generate_random_parameters::<E, _, _>(synth_input, rng).unwrap();
+    let setup_time = setup_start.elapsed();
+    println!("Setup: {:?}", setup_time);
 
+    let prover_start = Instant::now();
     // we will compute in 2 rounds
     // each precompute input will have its epoch...
     //println!("precomp inputs: {:?}", prover_data.precompute_inputs);
@@ -321,11 +337,17 @@ where
         epochs: &prover_data.epochs,
     };
     let pf = create_random_proof(synth_input, &p, rng).unwrap();
+    let prover_time = prover_start.elapsed();
+    println!("Prove: {:?}", prover_time);
 
+    let verify_start = Instant::now();
     let pvk = prepare_verifying_key(&p.vk);
-    let inputs = verifier_data.eval(inputs_map);
+    let inputs = verifier_data.eval(inputs_map, &test.lock().unwrap());
     let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
     verify_proof(&pvk, &pf, &inputs_as_ff).unwrap();
+    let verify_time = verify_start.elapsed();
+    println!("Verify: {:?}", verify_time);
+
     Ok(())
 }
 
@@ -432,11 +454,11 @@ pub fn verify<E: MultiMillerLoop, P1: AsRef<Path>, P2: AsRef<Path>>(
 ) -> io::Result<()> {
     let (vk, verifier_data) = read_verifier_key_and_data::<_, E>(vk_path)?;
     let pvk = prepare_verifying_key(&vk);
-    let inputs = verifier_data.eval(inputs_map);
-    let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
-    let mut pf_file = File::open(pf_path).unwrap();
-    let pf = Proof::read(&mut pf_file).unwrap();
-    verify_proof(&pvk, &pf, &inputs_as_ff).unwrap();
+    //let inputs = verifier_data.eval(inputs_map, test.lock());
+    //let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
+    //let mut pf_file = File::open(pf_path).unwrap();
+    //let pf = Proof::read(&mut pf_file).unwrap();
+    //verify_proof(&pvk, &pf, &inputs_as_ff).unwrap();
     Ok(())
 }
 

@@ -126,10 +126,10 @@ pub fn contains(haystack: Term, needle: &Term) -> bool {
 }
 
 /// Is `v` free in `t`? Wrong in the presence of lets.
-pub fn free_in(v: &str, t: Term) -> bool {
+pub fn free_in(vars: &FxHashSet<String>, t: Term) -> bool {
     for n in PostOrderIter::new(t) {
         match &n.op {
-            Op::Var(name, _) if v == name => {
+            Op::Var(name, _) if vars.contains(name) => {
                 return true;
             }
             _ => {}

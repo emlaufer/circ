@@ -211,6 +211,34 @@ fn main() {
     let options = Options::from_args();
     let path_buf = options.path.clone();
     println!("{:?}", options);
+    use std::time::Instant;
+    let compile_start = Instant::now();
+    
+    // fail fast for no input file
+    match &options.backend {
+        #[cfg(feature = "r1cs")]
+        Backend::R1cs {
+            action,
+            prover_key,
+            verifier_key,
+            lc_elimination_thresh,
+            proof_system,
+            inputs,
+            ..
+        } => {
+            match action {
+                ProofAction::Oneshot => {
+                    if !inputs.as_path().exists() {
+                        println!("Couldn't open inputs file {}!", inputs.display());
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+
     let mode = match options.backend {
         Backend::R1cs { .. } => match options.frontend.value_threshold {
             Some(t) => Mode::ProofOfHighValue(t),
@@ -324,6 +352,7 @@ fn main() {
             inputs,
             ..
         } => {
+
             println!("Converting to r1cs");
             let (r1cs, mut prover_data, verifier_data) =
                 to_r1cs(cs.get("main").clone(), FieldT::from(DFL_T.modulus()));
@@ -345,12 +374,13 @@ fn main() {
                             println!("Success!");
                         }
                         ProofSystem::Mirage => {
+                            println!("Compile Time: {:?}", compile_start.elapsed());
                             let input_map = parse_value_map(&std::fs::read(inputs).unwrap());
                             mirage::oneshot::<Bls12>(&prover_data, &verifier_data, &input_map)
                                 .unwrap();
                             println!("Success!");
                         }
-                        _ => {}
+                        _ => {panic!("unsupported")}
                     }
                 }
                 ProofAction::Setup => {

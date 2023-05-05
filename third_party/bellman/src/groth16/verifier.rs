@@ -25,6 +25,7 @@ pub fn verify_proof<'a, E: MultiMillerLoop>(
     proof: &Proof<E>,
     public_inputs: &[E::Fr],
 ) -> Result<(), VerificationError> {
+    // TODO: fix
     if (public_inputs.len() + 1) != pvk.ic.len() {
         println!(
             "Error: Got {} inputs, expected {}",

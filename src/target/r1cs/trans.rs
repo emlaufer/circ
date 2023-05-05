@@ -88,10 +88,8 @@ impl ToR1cs {
     ) -> TermLc {
         let mut epoch = extras::epoch(comp.clone(), &self.cs, &mut self.epoch_cache);
         // see if var belongs in epoch 1
-        for random_var in &self.random_inputs {
-            if extras::free_in(&random_var, comp.clone()) {
-                epoch = 1;
-            }
+        if extras::free_in(&self.random_inputs, comp.clone()) {
+            epoch = 1;
         }
 
         // max_epoch analysis on comp

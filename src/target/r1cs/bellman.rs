@@ -72,6 +72,15 @@ fn get_modulus<F: Field + PrimeField>() -> Integer {
     }
 }
 
+use std::sync::Mutex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref test: Mutex::<HashSet::<String>> = {
+        Mutex::<HashSet::<String>>::new(HashSet::default())
+    };
+}
+
 /// A synthesizable bellman circuit.
 ///
 /// Optionally contains a variable value map. This must be populated to use the
@@ -122,7 +131,7 @@ impl<'a, F: PrimeField> Circuit<F> for SynthInput<'a> {
                         })
                     };
                     let public = self.0.public_idxs.contains(&i);
-                    debug!("var: {}, public: {}", s, public);
+                    println!("var: {}, public: {}", s, public);
                     let v = if public {
                         cs.alloc_input(name_f, val_f)?
                     } else {
@@ -130,7 +139,8 @@ impl<'a, F: PrimeField> Circuit<F> for SynthInput<'a> {
                     };
                     vars.insert(i, v);
                 } else {
-                    debug!("drop dead var: {}", s);
+                    test.lock().unwrap().insert(s.to_string());
+                    println!("drop dead var: {}", s);
                 }
             }
         }
@@ -218,8 +228,11 @@ where
     prover_data.r1cs.check_all(&new_map);
     let pf = create_random_proof(SynthInput(&prover_data.r1cs, &Some(new_map)), &p, rng).unwrap();
 
+    println!("got verifier data map: {:?}, have {:?}", verifier_data.pf_input_order, inputs_map);
+    println!("Got dropped: {:?}", test.lock().unwrap());
     let pvk = prepare_verifying_key(&p.vk);
-    let inputs = verifier_data.eval(inputs_map);
+    let inputs = verifier_data.eval(inputs_map, &test.lock().unwrap());
+    println!("INPUTS ARE: {:?}", inputs);
     let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
     verify_proof(&pvk, &pf, &inputs_as_ff).unwrap();
     Ok(())
@@ -317,7 +330,7 @@ pub fn verify<E: MultiMillerLoop, P1: AsRef<Path>, P2: AsRef<Path>>(
 ) -> io::Result<()> {
     let (vk, verifier_data) = read_verifier_key_and_data::<_, E>(vk_path)?;
     let pvk = prepare_verifying_key(&vk);
-    let inputs = verifier_data.eval(inputs_map);
+    let inputs = verifier_data.eval(inputs_map, &test.lock().unwrap());
     let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
     let mut pf_file = File::open(pf_path).unwrap();
     let pf = Proof::read(&mut pf_file).unwrap();

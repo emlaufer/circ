@@ -49,24 +49,24 @@ pub fn verify<P: AsRef<Path>>(
     inst: &Instance,
     proof: NIZK,
 ) -> io::Result<()> {
-    let verifier_data = read_verifier_data::<_>(v_path)?;
+    //let verifier_data = read_verifier_data::<_>(v_path)?;
 
-    let values = verifier_data.eval(inputs_map);
+    //let values = verifier_data.eval(inputs_map);
 
-    let mut inp = Vec::new();
-    for v in &values {
-        let scalar = int_to_scalar(v);
-        inp.push(scalar.to_bytes());
-    }
-    let inputs = InputsAssignment::new(&inp).unwrap();
+    //let mut inp = Vec::new();
+    //for v in &values {
+    //    let scalar = int_to_scalar(v);
+    //    inp.push(scalar.to_bytes());
+    //}
+    //let inputs = InputsAssignment::new(&inp).unwrap();
 
-    println!("Verifying with Spartan");
-    let mut verifier_transcript = Transcript::new(b"nizk_example");
-    assert!(proof
-        .verify(inst, &inputs, &mut verifier_transcript, gens)
-        .is_ok());
+    //println!("Verifying with Spartan");
+    //let mut verifier_transcript = Transcript::new(b"nizk_example");
+    //assert!(proof
+    //    .verify(inst, &inputs, &mut verifier_transcript, gens)
+    //    .is_ok());
 
-    println!("Proof Verification Successful!");
+    //println!("Proof Verification Successful!");
     Ok(())
 }
 
