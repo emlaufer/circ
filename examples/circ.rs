@@ -392,7 +392,11 @@ fn main() {
                             println!("Success!");
                         }
                         ProofSystem::Mirage => {
-                            println!("Compile Time: {:?}", compile_start.elapsed());
+                            use floating_duration::TimeAsFloat;
+                            println!(
+                                "Compile Time: {:?}",
+                                compile_start.elapsed().as_fractional_secs()
+                            );
                             let input_map = parse_value_map(&std::fs::read(inputs).unwrap());
                             mirage::oneshot::<Bls12>(&prover_data, &verifier_data, &input_map)
                                 .unwrap();
