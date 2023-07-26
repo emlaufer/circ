@@ -225,7 +225,7 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
             }
         }
 
-        println!("Precomp: {:?}", precomp_time.as_fractional_secs());
+        println!("Precomp: {:?}", precomp_time.as_nanos());
         // add all constraints
         for (i, (a, b, c)) in self.r1cs.constraints.iter().enumerate() {
             cs.enforce(
@@ -311,7 +311,7 @@ where
     };
     let p = generate_random_parameters::<E, _, _>(synth_input, rng).unwrap();
     let setup_time = setup_start.elapsed();
-    println!("Setup: {:?}", setup_time.as_fractional_secs());
+    println!("Setup: {:?}", setup_time.as_nanos());
 
     // we will compute in 2 rounds
     // each precompute input will have its epoch...
@@ -343,7 +343,7 @@ where
     let prover_start = Instant::now();
     let pf = create_random_proof(synth_input, &p, rng).unwrap();
     let prover_time = prover_start.elapsed();
-    println!("Prove: {:?}", prover_time.as_fractional_secs());
+    println!("Prove: {:?}", prover_time.as_nanos());
 
     let verify_start = Instant::now();
     let pvk = prepare_verifying_key(&p.vk);
@@ -351,7 +351,7 @@ where
     let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
     verify_proof(&pvk, &pf, &inputs_as_ff).unwrap();
     let verify_time = verify_start.elapsed();
-    println!("Verify: {:?}", verify_time.as_fractional_secs());
+    println!("Verify: {:?}", verify_time.as_nanos());
 
     Ok(())
 }
