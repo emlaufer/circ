@@ -131,7 +131,7 @@ impl<'a, F: PrimeField> Circuit<F> for SynthInput<'a> {
                         })
                     };
                     let public = self.0.public_idxs.contains(&i);
-                    println!("var: {}, public: {}", s, public);
+                    //println!("var: {}, public: {}", s, public);
                     let v = if public {
                         cs.alloc_input(name_f, val_f)?
                     } else {
@@ -140,7 +140,7 @@ impl<'a, F: PrimeField> Circuit<F> for SynthInput<'a> {
                     vars.insert(i, v);
                 } else {
                     test.lock().unwrap().insert(s.to_string());
-                    println!("drop dead var: {}", s);
+                    //println!("drop dead var: {}", s);
                 }
             }
         }
@@ -206,9 +206,14 @@ where
     E::G1: WnafGroup,
     E::G2: WnafGroup,
 {
+    use std::time::Instant;
+
     let rng = &mut rand::thread_rng();
+    let setup_start = Instant::now();
     let p =
         generate_random_parameters::<E, _, _>(SynthInput(&prover_data.r1cs, &None), rng).unwrap();
+    let setup_time = setup_start.elapsed();
+    println!("Setup: {:?}", setup_time);
 
     // what we will do is compute in rounds 2 rounds
     // each precompute input will have its epoch...
@@ -224,15 +229,20 @@ where
             input, sort, sort2
         );
     }
-    let new_map = prover_data.precompute.eval(inputs_map);
+    let precomp_start = Instant::now();
+    let new_map = prover_data.precompute.eval_cache(inputs_map, &mut TermMap::new());
+    println!("Precomp: {:?}", precomp_start.elapsed());
+    let prover_start = Instant::now();
     prover_data.r1cs.check_all(&new_map);
     let pf = create_random_proof(SynthInput(&prover_data.r1cs, &Some(new_map)), &p, rng).unwrap();
+    let prover_time = prover_start.elapsed();
+    println!("Prove: {:?}", prover_time);
 
-    println!("got verifier data map: {:?}, have {:?}", verifier_data.pf_input_order, inputs_map);
-    println!("Got dropped: {:?}", test.lock().unwrap());
+    //println!("got verifier data map: {:?}, have {:?}", verifier_data.pf_input_order, inputs_map);
+    //println!("Got dropped: {:?}", test.lock().unwrap());
     let pvk = prepare_verifying_key(&p.vk);
     let inputs = verifier_data.eval(inputs_map, &test.lock().unwrap());
-    println!("INPUTS ARE: {:?}", inputs);
+    //println!("INPUTS ARE: {:?}", inputs);
     let inputs_as_ff: Vec<E::Fr> = inputs.into_iter().map(int_to_ff).collect();
     verify_proof(&pvk, &pf, &inputs_as_ff).unwrap();
     Ok(())

@@ -177,17 +177,87 @@ impl Ram {
             .iter()
             .map(|access| access.idx.clone())
             .collect();
-        // create array from idx->val to precompute correct values from sorted idxs
+        let idx_field = match &self.idx_sort {
+            Sort::Field(field) => field,
+            _ => panic!("Cannot use RAM on non-field index type!"),
+        };
+
+        // construct array for precompute of ram indices
+        //let idx_tuples = self.accesses.iter()
+        //    .enumerate()
+        //    .map(|(i, a)| term![Op::Tuple; pf_lit(idx_field.new_v::<usize>(i)), a.idx.clone()])
+        //    .collect();
+        //let idx_array_term = term(Op::Array(self.idx_sort.clone(), self.idx_sort.clone()), idx_tuples);
+        //let idx_array_name = format!("__ram_idxs_{}", self.id);
+        //let idx_array_epoch = extras::epoch(
+        //    idx_array_term.clone(),
+        //    computation,
+        //    epoch_cache,
+        //);
+        //let idx_array_var = computation.new_var(
+        //    &idx_array_name,
+        //    Sort::Array(Box::new(self.idx_sort.clone()), Box::new(self.idx_sort.clone()), self.accesses.len()),
+        //    Some(crate::ir::proof::PROVER_ID),
+        //    idx_array_epoch,
+        //    false,
+        //    Some(idx_array_term),
+        //);
+
+        // create array from i->(idx,val) to precompute correct values from sorted idxs
         let empty_arr = leaf_term(Op::Const(Value::Array(Array::default(
             self.idx_sort.clone(),
             &self.val_sort,
             self.size,
         ))));
-        let val_array_term = self.accesses.iter().fold(
-            empty_arr,
-            |arr, access| term![Op::Store; arr, access.idx.clone(), access.val.clone()],
+        let val_tuples = self
+            .accesses
+            .iter()
+            .map(|a| term![Op::Tuple; a.idx.clone(), a.val.clone()])
+            .collect();
+        let val_array_term = term(
+            Op::Array(
+                self.idx_sort.clone(),
+                Sort::Tuple(Box::new([self.idx_sort.clone(), self.val_sort.clone()])),
+            ),
+            val_tuples,
         );
+        let val_array_name = format!("__ram_vals_{}", self.id);
+        let val_array_epoch = extras::epoch(val_array_term.clone(), computation, epoch_cache);
+        let val_array_var = computation.new_var(
+            &val_array_name,
+            Sort::Array(
+                Box::new(self.idx_sort.clone()),
+                Box::new(Sort::Tuple(Box::new([
+                    self.idx_sort.clone(),
+                    self.val_sort.clone(),
+                ]))),
+                self.accesses.len(),
+            ),
+            Some(crate::ir::proof::PROVER_ID),
+            val_array_epoch,
+            false,
+            Some(val_array_term),
+        );
+        // TODO: add vars for both arrays, maybe will be better?
 
+        // sort array by index
+        let sorted_idx_array_term = term![Op::Sort; val_array_var.clone()];
+        let sorted_idx_array_name = format!("__ram_sorted_array_{}", self.id);
+        let sorted_idx_array_var = computation.new_var(
+            &sorted_idx_array_name,
+            Sort::Array(
+                Box::new(self.idx_sort.clone()),
+                Box::new(Sort::Tuple(Box::new([
+                    self.idx_sort.clone(),
+                    self.val_sort.clone(),
+                ]))),
+                self.accesses.len(),
+            ),
+            Some(crate::ir::proof::PROVER_ID),
+            val_array_epoch,
+            false,
+            Some(sorted_idx_array_term),
+        );
         // construct a term that ensures __ram_srows are a witness to the ordering
         // constraints on __ram values
         let mut sorted_accesses = Vec::new();
@@ -199,29 +269,18 @@ impl Ram {
             //let is_write_name = format!("__ram_srow_{}_{}.is_write", ramid, i);
             let idx_name = format!("__ram_srow_{}_{}.idx", self.id, i);
             let val_name = format!("__ram_srow_{}_{}.val", self.id, i);
-            //let is_write = cs.new_var(
-            //    &is_write_name,
-            //    ram.idx_sort.clone(),
-            //    Some(crate::ir::proof::PROVER_ID),
-            //    None,
-            //);
-            let idx_epoch = extras::epoch(
-                term(Op::NthSmallest(i), idx_terms.clone()),
-                computation,
-                epoch_cache,
-            );
-            let val_epoch = extras::epoch(
-                term![Op::Select; val_array_term.clone(), term(Op::NthSmallest(i), idx_terms.clone())],
-                computation,
-                epoch_cache,
-            );
+
+            let idx_term = term![Op::Field(0); term![Op::Select; sorted_idx_array_var.clone(), pf_lit(idx_field.new_v::<usize>(i))]];
+            let val_term = term![Op::Field(1); term![Op::Select; sorted_idx_array_var.clone(), pf_lit(idx_field.new_v::<usize>(i))]];
+            let idx_epoch = extras::epoch(idx_term.clone(), computation, epoch_cache);
+            let val_epoch = extras::epoch(val_term.clone(), computation, epoch_cache);
             let idx = computation.new_var(
                 &idx_name,
                 self.idx_sort.clone(),
                 Some(crate::ir::proof::PROVER_ID),
                 idx_epoch, // TODO
                 false,
-                Some(term(Op::NthSmallest(i), idx_terms.clone())),
+                Some(idx_term),
             );
             let val = computation.new_var(
                 &val_name,
@@ -229,9 +288,7 @@ impl Ram {
                 Some(crate::ir::proof::PROVER_ID),
                 val_epoch, // TODO
                 false,
-                Some(
-                    term![Op::Select; val_array_term.clone(), term(Op::NthSmallest(i), idx_terms.clone())],
-                ),
+                Some(val_term),
             );
             let access = Access {
                 is_write: bool_lit(false),
@@ -316,6 +373,11 @@ impl ArrayGraph {
         let mut cs = TermMap::default();
         let mut arrs = TermSet::default();
         let mut subsumed = TermSet::default();
+        // TODO: This is only extracitng arrays with stores...
+        //       need to also get array terms...
+        // TODO: I assume we only want arrays here that also have
+        //       conditional selects? or indirect selects? not sure.
+
         // We go parent->children to see conditional stores before their subsumed stores.
         // clippy thinks this is needless, but we need it for the reverse iteration.
         #[allow(clippy::needless_collect)]
@@ -347,6 +409,9 @@ impl ArrayGraph {
                         }
                     }
                 }
+            }
+            if let Op::Array(..) = t.op {
+                arrs.insert(t.clone());
             }
         }
         let mut non_ram: TermSet = TermSet::default();
@@ -426,6 +491,23 @@ impl<'a> Extactor<'a> {
                 self.rams.push(Ram::new(id, a.clone()));
                 id
             }
+            Op::Array(..) => {
+                if let Some(id) = self.term_ram.get(t) {
+                    return *id;
+                }
+
+                let id = self.rams.len();
+                let t_sort = check(t);
+                let (key_sort, val_sort, size) = t_sort.as_array();
+                let val = Array::default(key_sort.clone(), &val_sort, size);
+                self.rams.push(Ram::new(id, val));
+                let mut ram = &mut self.rams[id];
+                // for an array constructor: add writes (at constant indices)
+                for (i, val) in t.cs.iter().enumerate() {
+                    ram.new_write(key_sort.nth_elem(i), val.clone(), bool_lit(true));
+                }
+                id
+            }
             Op::Field(idx) => self.get_or_start(&t.cs[0].get().cs[*idx]),
             _ => *self
                 .term_ram
@@ -473,32 +555,44 @@ impl<'a> RewritePass for Extactor<'a> {
     ) -> Option<Term> {
         // First, we rewrite RAM terms.
         if self.graph.is_ram(t) {
-            // Since this is a "RAM" term, it is non-constant and either a c-store or a store.
-            assert!(matches!(t.op, Op::Store | Op::Ite));
-            debug_assert!(self.graph.children.get(t).is_some());
-            debug_assert_eq!(1, self.graph.children.get(t).unwrap().len());
-            // Get dependency's RAM
-            let child = self.graph.children.get(t).unwrap()[0].clone();
-            let ram_id = self.get_or_start(&child);
-            let ram = &mut self.rams[ram_id];
-            // Build new term, and parse as a c-store
-            let new = term(t.op.clone(), rewritten_children());
-            let c_store = parse_cond_store(&new).unwrap_or_else(|| {
-                // this is a plain store then, map it to a c-store
-                assert_eq!(Op::Store, new.op);
-                ConditionalStore {
-                    arr: new.cs[0].clone(),
-                    idx: new.cs[1].clone(),
-                    val: new.cs[2].clone(),
-                    guard: bool_lit(true),
-                    store: bool_lit(false), // dummy; unused.
-                }
-            });
-            // Add the write to the RAM
-            ram.new_write(c_store.idx, c_store.val, c_store.guard);
-            let id = ram.id;
-            self.term_ram.insert(t.clone(), id);
-            None
+            if matches!(t.op, Op::Array(..)) && !self.term_ram.contains_key(&t) {
+                let ram_id = self.get_or_start(&t);
+                let ram = &mut self.rams[ram_id];
+                self.term_ram.insert(t.clone(), ram_id);
+                let new = term(t.op.clone(), rewritten_children());
+                None
+            } else {
+                // Since this is a "RAM" term, it is non-constant and either a c-store or a store.
+                assert!(matches!(t.op, Op::Store | Op::Ite), "OOOOOOF");
+                assert!(self.graph.children.get(t).is_some(), "No children");
+                assert_eq!(
+                    1,
+                    self.graph.children.get(t).unwrap().len(),
+                    "Too many children"
+                );
+                // Get dependency's RAM
+                let child = self.graph.children.get(t).unwrap()[0].clone();
+                let ram_id = self.get_or_start(&child);
+                let ram = &mut self.rams[ram_id];
+                // Build new term, and parse as a c-store
+                let new = term(t.op.clone(), rewritten_children());
+                let c_store = parse_cond_store(&new).unwrap_or_else(|| {
+                    // this is a plain store then, map it to a c-store
+                    assert_eq!(Op::Store, new.op);
+                    ConditionalStore {
+                        arr: new.cs[0].clone(),
+                        idx: new.cs[1].clone(),
+                        val: new.cs[2].clone(),
+                        guard: bool_lit(true),
+                        store: bool_lit(false), // dummy; unused.
+                    }
+                });
+                // Add the write to the RAM
+                ram.new_write(c_store.idx, c_store.val, c_store.guard);
+                let id = ram.id;
+                self.term_ram.insert(t.clone(), id);
+                None
+            }
         } else {
             match &t.op {
                 // Rewrite select's whose array is a RAM term
@@ -553,7 +647,7 @@ impl<'a> Encoder<'a> {
         term![EQ; orig_ms_hash, perm_ms_hash]
     }
 
-    fn construct_sorted_check(sorted_ram: &Ram) -> Term {
+    fn construct_sorted_check(sorted_ram: &Ram, computation: &mut Computation) -> Term {
         // TODO: support non-field indices?
         //       Just do a cast on permuation check, and have correct type
         //       in sorted check
@@ -582,6 +676,14 @@ impl<'a> Encoder<'a> {
                     term![PF_ADD; sorted_ram.accesses[i-1].idx.clone(), pf_lit(idx_field.new_v::<u32>(1))]
                 ]
             ];
+            computation.new_var(
+                &format!("__TEST_SORTED_{}_{}", sorted_ram.id, i),
+                Sort::Bool,
+                Some(crate::ir::proof::PROVER_ID),
+                0, // TODO
+                false,
+                Some(check_term.clone()),
+            );
             check_terms.push(check_term);
         }
         term(AND, check_terms)
@@ -602,15 +704,23 @@ impl<'a> Encoder<'a> {
             "Proofs using RAMs must have a boolean output!"
         );
 
-        // remove ram writes
-        // TODO: This ONLY works for read-only rams.
-        //for ram in self.rams.iter_mut() {
-        //    while !ram.accesses.is_empty()
-        //        && eval(&ram.accesses[0].is_write, &fxhash::FxHashMap::default()).as_bool()
-        //    {
-        //        ram.accesses.remove(0);
-        //    }
-        //}
+        // fix up writes in rams...
+        // we don't actually use them, but makes the circuit simpler
+        // so we will just fix up the values here
+        for ram in self.rams.iter_mut() {
+            ram.accesses
+                .sort_by_key(|r| !eval(&r.is_write, &fxhash::FxHashMap::default()).as_bool());
+            if ram.accesses.len() >= 2 * ram.size {
+                let should_remove = ram.accesses[..2 * ram.size]
+                    .iter()
+                    .all(|r| eval(&r.is_write, &fxhash::FxHashMap::default()).as_bool());
+                let mut i = 0;
+                while should_remove && i < ram.size {
+                    ram.accesses.remove(0);
+                    i += 1;
+                }
+            }
+        }
 
         // remove rams that are empty
         // TODO: maybe throw a warning here?
@@ -646,7 +756,7 @@ impl<'a> Encoder<'a> {
             let sorted_ram = ram.sorted_by_index(computation, self.cache);
             // TODO: better error handling
             // TODO: is there a cleaner way to get the field type?
-            let sorted_check = Encoder::construct_sorted_check(&sorted_ram);
+            let sorted_check = Encoder::construct_sorted_check(&sorted_ram, computation);
 
             let permutation_check =
                 Encoder::construct_permutation_check(ram, &sorted_ram, alpha.clone(), beta.clone());
@@ -677,12 +787,10 @@ pub fn extract(c: &mut Computation, cache: &mut TermMap<u8>) -> Vec<Ram> {
     for ram in &extractor.rams {
         println!("------------");
         println!("ram id: {:?}, len: {:?}", ram.id, ram.accesses.len());
-        //for access in ram.accesses.iter() {
-        //    println!("{:?}", access);
-        //}
-        //println!("{:?}", ram.accesses[4]);
-        //println!("{:?}", ram.accesses[5]);
-        //println!("{:?}", ram.accesses[6]);
+        println!(
+            "ram val: {:?}",
+            c.precomputes.outputs().get(&format!("__ram_{}_0", ram.id))
+        );
     }
     extractor.rams
 }
@@ -694,12 +802,8 @@ pub fn extract(c: &mut Computation, cache: &mut TermMap<u8>) -> Vec<Ram> {
 ///       1. doesn't do a single write, then only reads
 ///       2. doesn't access every single element in the ram
 pub fn encode(c: &mut Computation, rams: Vec<Ram>, cache: &mut TermMap<u8>) {
-    //println!("Pre-opt terms: {}", c.outputs[0].get().count_terms());
-    //println!("got {}", c.outputs[0].get());
     let mut encoder = Encoder::new(rams, cache);
     encoder.encode(c);
-    //println!("got {}", c.outputs[0].get());
-    //println!("Opt-done terms: {}", c.outputs[0].get().count_terms());
 }
 
 #[cfg(test)]

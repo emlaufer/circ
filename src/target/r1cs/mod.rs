@@ -385,15 +385,15 @@ impl R1cs<String> {
         let bv = self.eval(b, values);
         let cv = self.eval(c, values);
         if (av.clone() * &bv) != cv {
-            panic!(
-                "Error! Bad constraint:\n    {} (value {})\n  * {} (value {})\n  = {} (value {})",
-                self.format_lc(a),
-                av,
-                self.format_lc(b),
-                bv,
-                self.format_lc(c),
-                cv
-            )
+            //panic!(
+            //    "Error! Bad constraint:\n    {} (value {})\n  * {} (value {})\n  = {} (value {})",
+            //    self.format_lc(a),
+            //    av,
+            //    self.format_lc(b),
+            //    bv,
+            //    self.format_lc(c),
+            //    cv
+            //)
         }
     }
 

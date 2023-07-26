@@ -3,6 +3,7 @@
 //! A compiler infrastructure for compiling programs to circuits
 
 #![warn(missing_docs)]
+#![allow(warnings)]
 //#![deny(warnings)]
 
 #[macro_use]

@@ -87,15 +87,20 @@ impl ToR1cs {
         random: bool,
     ) -> TermLc {
         let mut epoch = extras::epoch(comp.clone(), &self.cs, &mut self.epoch_cache);
-        // see if var belongs in epoch 1
-        if extras::free_in(&self.random_inputs, comp.clone()) {
-            epoch = 1;
-        }
+
+        // TODO: unneeded I think
+        //if extras::free_in(&self.random_inputs, comp.clone()) {
+        //    if epoch != 1 {
+        //        panic!("GOTTEM");
+        //    }
+        //    epoch = 1;
+        //}
 
         // max_epoch analysis on comp
         // epoch number with signal
         // output is defining the computation the prover runs as a precompute
         let n = format!("{}_n{}", ctx, self.next_idx);
+        //println!("FREE IN FOR {}: {:?}", n, start.elapsed());
         //println!("n is {}", n);
         self.next_idx += 1;
         debug_assert!(matches!(check(&comp), Sort::Field(_)));

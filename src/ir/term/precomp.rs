@@ -92,6 +92,24 @@ impl PreComp {
         env
     }
 
+    /// Evaluate the precomputation.
+    ///
+    /// Requires an input environment that binds all inputs for the underlying computation.
+    pub fn eval_cache(
+        &self,
+        env: &FxHashMap<String, Value>,
+        value_cache: &mut TermMap<Value>,
+    ) -> FxHashMap<String, Value> {
+        let mut env = env.clone();
+        // iterate over all terms, evaluating them using the cache.
+        for (o_name, _o_sort) in &self.sequence {
+            let o = self.outputs.get(o_name).unwrap();
+            eval_cached(o, &env, value_cache);
+            env.insert(o_name.clone(), value_cache.get(o).unwrap().clone());
+        }
+        env
+    }
+
     /// Get all outputs, in seqence, as a tuple
     pub fn tuple(&self) -> Term {
         term(

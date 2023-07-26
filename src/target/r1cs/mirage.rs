@@ -27,13 +27,12 @@ use rug::Integer;
 use super::*;
 use crate::ir::term::precomp::PreComp;
 
-use std::sync::Mutex;
 use lazy_static::lazy_static;
+use std::sync::Mutex;
 
 lazy_static! {
-    static ref test: Mutex::<HashSet::<String>> = {
-        Mutex::<HashSet::<String>>::new(HashSet::default())
-    };
+    static ref test: Mutex::<HashSet::<String>> =
+        { Mutex::<HashSet::<String>>::new(HashSet::default()) };
 }
 
 /// Convert a (rug) integer to a prime field element.
@@ -149,8 +148,11 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
             });
         }
 
+        let mut precomp_time = std::time::Duration::new(0, 0);
+        let mut value_cache: TermMap<Value> = TermMap::new();
         let mut vars = HashMap::with_capacity(self.r1cs.next_idx);
         for epoch in 0..num_epochs {
+            let precomp_start = std::time::Instant::now();
             //println!("at epoch {} of {}", epoch, num_epochs);
             // compute the witnesses for this epoch
             if let Some(precomp) = self.precomp {
@@ -161,8 +163,9 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
                         precomp_restricted.restrict_to_inputs(epoch_vars.clone());
                     }
                 }
-                values = Some(precomp_restricted.eval(&values.unwrap()));
+                values = Some(precomp_restricted.eval_cache(&values.unwrap(), &mut value_cache));
             }
+            precomp_time += precomp_start.elapsed();
 
             // add each known witness/input variable to the constraint system
             for i in 0..self.r1cs.next_idx {
@@ -221,6 +224,7 @@ impl<'a, F: PrimeField + PrimeFieldBits> RandomCircuit<F> for SynthInput<'a> {
             }
         }
 
+        println!("Precomp: {:?}", precomp_time);
         // add all constraints
         for (i, (a, b, c)) in self.r1cs.constraints.iter().enumerate() {
             cs.enforce(
@@ -296,8 +300,8 @@ where
 {
     use std::time::Instant;
 
-    let setup_start = Instant::now();
     let rng = &mut rand::thread_rng();
+    let setup_start = Instant::now();
     let synth_input = SynthInput {
         r1cs: &prover_data.r1cs,
         input_map: &None,
@@ -308,7 +312,6 @@ where
     let setup_time = setup_start.elapsed();
     println!("Setup: {:?}", setup_time);
 
-    let prover_start = Instant::now();
     // we will compute in 2 rounds
     // each precompute input will have its epoch...
     //println!("precomp inputs: {:?}", prover_data.precompute_inputs);
@@ -336,6 +339,7 @@ where
         precomp: &Some(prover_data.precompute.clone()),
         epochs: &prover_data.epochs,
     };
+    let prover_start = Instant::now();
     let pf = create_random_proof(synth_input, &p, rng).unwrap();
     let prover_time = prover_start.elapsed();
     println!("Prove: {:?}", prover_time);

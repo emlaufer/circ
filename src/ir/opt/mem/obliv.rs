@@ -153,6 +153,24 @@ impl ProgressAnalysisPass for NonOblivComputer {
                 progress = self.bi_implicate(term, a) || progress;
                 progress
             }
+            Op::Array(..) => {
+                let mut progress = false;
+                if !term.cs.is_empty() {
+                    if let Sort::Array(..) = check(&term.cs[0]) {
+                        progress = self.bi_implicate(term, &term.cs[0]) || progress;
+                        for i in 0..term.cs.len() - 1 {
+                            progress =
+                                self.bi_implicate(&term.cs[i], &term.cs[i + 1]) || progress;
+                        }
+                        for i in (0..term.cs.len() - 1).rev() {
+                            progress =
+                                self.bi_implicate(&term.cs[i], &term.cs[i + 1]) || progress;
+                        }
+                        progress = self.bi_implicate(term, &term.cs[0]) || progress;
+                    }
+                }
+                progress
+            }
             Op::Ite => {
                 let t = &term.cs[1];
                 let f = &term.cs[2];
@@ -229,7 +247,6 @@ impl RewritePass for Replacer {
         orig: &Term,
         rewritten_children: F,
     ) -> Option<Term> {
-        //debug!("Visit {}", extras::Letified(orig.clone()));
         let get_cs = || -> Vec<Term> {
             rewritten_children()
                 .into_iter()
@@ -265,6 +282,14 @@ impl RewritePass for Replacer {
                     debug_assert_eq!(cs.len(), 3);
                     let k_const = get_const(&cs.remove(1));
                     Some(term(Op::Update(k_const), cs))
+                } else {
+                    None
+                }
+            }
+            Op::Array(..) => {
+                if self.should_replace(orig) {
+                    let res = Some(term(Op::Tuple, get_cs()));
+                    res
                 } else {
                     None
                 }

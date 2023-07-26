@@ -106,6 +106,18 @@ impl TupleTree {
     fn bimap(&self, mut f: impl FnMut(Term, Term) -> Term, other: &Self) -> Self {
         self.structure(itertools::zip_eq(self.flatten(), other.flatten()).map(|(a, b)| f(a, b)))
     }
+    fn transpose_map(vs: Vec<Self>, f: impl FnMut(Vec<Term>) -> Term) -> Self {
+        assert!(!vs.is_empty());
+        let n = vs[0].flatten().count();
+        let mut ts = vec![Vec::new(); n];
+        for v in &vs {
+            for (i, t) in v.flatten().enumerate() {
+                ts[i].push(t);
+            }
+        }
+        let ret = vs[0].structure(ts.into_iter().map(f));
+        ret
+    }
     fn get(&self, i: usize) -> Self {
         match self {
             TupleTree::NonTuple(cs) => {
@@ -118,7 +130,7 @@ impl TupleTree {
                 }
             }
             TupleTree::Tuple(t) => {
-                assert!(i < t.len());
+                assert!(i < t.len(), "{:?} {} {}", t, i, t.len());
                 t.get(i).unwrap().clone()
             }
         }
@@ -137,6 +149,32 @@ impl TupleTree {
             TupleTree::NonTuple(t) => t,
             _ => panic!("{:?} is tuple!", self),
         }
+    }
+    fn sort(&self) -> Sort {
+        match self {
+            TupleTree::NonTuple(t) => check(&t),
+            TupleTree::Tuple(tuples) => {
+                Sort::Tuple(tuples.iter().map(|ti| ti.sort()).collect())
+            }
+        }
+    }
+}
+
+fn sort_map(sort: &Sort, f: &impl Fn(&Sort) -> Sort) -> Sort {
+    match sort {
+        Sort::Array(_k, _v, _s) => panic!("Conception is wrong!"),
+        Sort::Tuple(cs) => Sort::Tuple(cs.iter().map(|c| sort_map(c, f)).collect()),
+        _ => f(sort)
+    }
+}
+
+fn expected_sort(sort: &Sort) -> Sort {
+    match sort {
+        // * `(array k t) -> map (array k *) T
+        Sort::Array(key, val, len) => sort_map(&expected_sort(val), &|s: &Sort| Sort::Array(key.clone(), Box::new(s.clone()), *len)),
+        // * `(tuple [t_i]_i) -> (tuple [T_i]_i)`
+        Sort::Tuple(cs) => Sort::Tuple(cs.iter().map(|c| expected_sort(c)).collect()),
+        _ => sort.clone()
     }
 }
 
@@ -266,12 +304,21 @@ pub fn eliminate_tuples(cs: &mut Computation) {
                 debug_assert!(cs.is_empty());
                 t.update(*i, &v)
             }
+            Op::Array(k, _v) => 
+            {
+                TupleTree::transpose_map(cs, |children| {
+                assert!(!children.is_empty());
+                let v_s = check(&children[0]);
+                term(Op::Array(k.clone(), v_s), children)
+            })
+            }
             Op::Tuple => TupleTree::Tuple(cs.into()),
             _ => TupleTree::NonTuple(term(
                 t.op.clone(),
                 cs.into_iter().map(|c| c.unwrap_non_tuple()).collect(),
             )),
         };
+        assert_eq!(expected_sort(&check(&t)), new_t.sort());
         lifted.insert(t, new_t);
     }
     cs.outputs = std::mem::take(&mut cs.outputs)

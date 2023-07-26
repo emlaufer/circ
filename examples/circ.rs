@@ -213,7 +213,7 @@ fn main() {
     println!("{:?}", options);
     use std::time::Instant;
     let compile_start = Instant::now();
-    
+
     // fail fast for no input file
     match &options.backend {
         #[cfg(feature = "r1cs")]
@@ -225,17 +225,15 @@ fn main() {
             proof_system,
             inputs,
             ..
-        } => {
-            match action {
-                ProofAction::Oneshot => {
-                    if !inputs.as_path().exists() {
-                        println!("Couldn't open inputs file {}!", inputs.display());
-                        return;
-                    }
+        } => match action {
+            ProofAction::Oneshot => {
+                if !inputs.as_path().exists() {
+                    println!("Couldn't open inputs file {}!", inputs.display());
+                    return;
                 }
-                _ => {}
             }
-        }
+            _ => {}
+        },
         _ => {}
     }
 
@@ -316,20 +314,41 @@ fn main() {
         }
         Mode::Proof | Mode::ProofOfHighValue(_) => opt(
             cs,
+            //vec![
+            //    Opt::RamExt,
+            //    Opt::ScalarizeVars,
+            //    Opt::Flatten,
+            //    Opt::Sha,
+            //    Opt::ConstantFold(Box::new([])),
+            //    Opt::Flatten,
+            //    Opt::Inline,
+            //    // Tuples must be eliminated before oblivious array elim
+            //    Opt::Tuple,
+            //    Opt::ConstantFold(Box::new([])),
+            //    Opt::Obliv,
+            //    // The obliv elim pass produces more tuples, that must be eliminated
+            //    Opt::Tuple,
+            //    Opt::LinearScan,
+            //    // The linear scan pass produces more tuples, that must be eliminated
+            //    Opt::Tuple,
+            //    Opt::Flatten,
+            //    Opt::ConstantFold(Box::new([])),
+            //    Opt::Inline,
+            //],
             vec![
+                // Tuples must be eliminated before oblivious array elim
+                Opt::Tuple,
+                Opt::ConstantFold(Box::new([])),
+                Opt::Obliv,
+                //// The obliv elim pass produces more tuples, that must be eliminated
                 Opt::RamExt,
+                Opt::Tuple,
                 Opt::ScalarizeVars,
                 Opt::Flatten,
                 Opt::Sha,
                 Opt::ConstantFold(Box::new([])),
                 Opt::Flatten,
                 Opt::Inline,
-                // Tuples must be eliminated before oblivious array elim
-                Opt::Tuple,
-                Opt::ConstantFold(Box::new([])),
-                Opt::Obliv,
-                // The obliv elim pass produces more tuples, that must be eliminated
-                Opt::Tuple,
                 Opt::LinearScan,
                 // The linear scan pass produces more tuples, that must be eliminated
                 Opt::Tuple,
@@ -352,7 +371,6 @@ fn main() {
             inputs,
             ..
         } => {
-
             println!("Converting to r1cs");
             let (r1cs, mut prover_data, verifier_data) =
                 to_r1cs(cs.get("main").clone(), FieldT::from(DFL_T.modulus()));
@@ -380,7 +398,9 @@ fn main() {
                                 .unwrap();
                             println!("Success!");
                         }
-                        _ => {panic!("unsupported")}
+                        _ => {
+                            panic!("unsupported")
+                        }
                     }
                 }
                 ProofAction::Setup => {

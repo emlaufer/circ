@@ -136,6 +136,7 @@
 
 // Catch documentation errors caused by code changes.
 #![deny(rustdoc::broken_intra_doc_links)]
+#![allow(warnings)]
 
 pub mod domain;
 pub mod gadgets;

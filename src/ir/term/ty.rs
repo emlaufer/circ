@@ -70,6 +70,8 @@ fn check_dependencies(t: &Term) -> Vec<Term> {
         // TODO: for now, I'm assuming the type of all args will be the same
         //       though I don't think anything enforces this...
         Op::NthSmallest(_) => vec![t.cs[0].clone()],
+        Op::Sort => vec![t.cs[0].clone()],
+        Op::Array(..) => Vec::new(),
     }
 }
 
@@ -187,6 +189,12 @@ fn check_raw_step(t: &Term, tys: &TypeTable) -> Result<Sort, TypeErrorReason> {
         Op::Call(_, _, ret) => Ok(ret.clone()),
         Op::Rot(_) => Ok(get_ty(&t.cs[0]).clone()),
         Op::NthSmallest(_) => Ok(get_ty(&t.cs[0]).clone()),
+        Op::Sort => Ok(get_ty(&t.cs[0]).clone()),
+        Op::Array(k, v) => Ok(Sort::Array(
+            Box::new(k.clone()),
+            Box::new(v.clone()),
+            t.cs.len(),
+        )),
         o => Err(TypeErrorReason::Custom(format!("other operator: {}", o))),
     }
 }

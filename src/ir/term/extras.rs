@@ -139,28 +139,6 @@ pub fn free_in(vars: &FxHashSet<String>, t: Term) -> bool {
 }
 
 pub fn epoch(t: Term, cs: &Computation, cache: &mut TermMap<u8>) -> u8 {
-    // TODO: add support for more than 2 epochs
-    //let mut has_rand = false;
-    //for n in PostOrderIter::new(t) {
-    //    match &n.op {
-    //        Op::Var(name, _) => {
-    //            let meta = cs.metadata.input_vis.get(name);
-    //            if let Some(meta) = meta {
-    //                if meta.random || meta.epoch != 0 {
-    //                    has_rand = true;
-    //                    break;
-    //                }
-    //            }
-    //        }
-    //        _ => {}
-    //    }
-    //}
-
-    //if has_rand {
-    //    1
-    //} else {
-    //    0
-    //}
     // (children pushed, term)
     let mut stack = vec![(false, t.clone())];
     while let Some((children_pushed, node)) = stack.pop() {

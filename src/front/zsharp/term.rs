@@ -738,32 +738,38 @@ pub fn array_store(array: T, idx: T, val: T) -> Result<T, String> {
     }
 }
 
-fn ir_array<I: IntoIterator<Item = Term>>(sort: Sort, elems: I) -> Term {
-    let mut values = HashMap::new();
-    let to_insert = elems
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, t)| {
-            let i_val = pf_val(i);
-            match const_value(&t) {
-                Some(v) => {
-                    values.insert(i_val, v);
-                    None
-                }
-                None => Some((leaf_term(Op::Const(i_val)), t)),
-            }
-        })
-        .collect::<Vec<(Term, Term)>>();
-    let len = values.len() + to_insert.len();
-    let arr = leaf_term(Op::Const(Value::Array(Array::new(
-        Sort::Field(DFL_T.clone()),
-        Box::new(sort.default_value()),
-        values.into_iter().collect::<BTreeMap<_, _>>(),
-        len,
-    ))));
-    to_insert
-        .into_iter()
-        .fold(arr, |arr, (idx, val)| term![Op::Store; arr, idx, val])
+fn ir_array<I: IntoIterator<Item = Term> + Clone>(sort: Sort, elems: I) -> Term {
+    //let mut values = HashMap::new();
+    //println!("Elems: {:?}", elems.clone().into_iter().collect::<Vec<_>>());
+    //let to_insert = elems
+    //    .into_iter()
+    //    .enumerate()
+    //    .filter_map(|(i, t)| {
+    //        let i_val = pf_val(i);
+    //        match const_value(&t) {
+    //            Some(v) => {
+    //                values.insert(i_val, v);
+    //                None
+    //            }
+    //            None => Some((leaf_term(Op::Const(i_val)), t)),
+    //        }
+    //    })
+    //    .collect::<Vec<(Term, Term)>>();
+    //let len = values.len() + to_insert.len();
+    ////let arr = leaf_term(Op::Const(Value::Array(Array::new(
+    ////    Sort::Field(DFL_T.clone()),
+    ////    Box::new(sort.default_value()),
+    ////    values.into_iter().collect::<BTreeMap<_, _>>(),
+    ////    len,
+    ////))));
+    //let tuple_terms: Vec<Term> = to_insert.into_iter()
+    //    .map(|(idx, val)| val)
+    //    .collect();
+    //assert!(!tuple_terms.is_empty());
+    term(Op::Array(Sort::Field(DFL_T.clone()), sort), elems.into_iter().collect())
+    //to_insert
+    //    .into_iter()
+    //    .fold(arr, |arr, (idx, val)| term![Op::Store; arr, idx, val])
 }
 
 pub fn array<I: IntoIterator<Item = T>>(elems: I) -> Result<T, String> {
