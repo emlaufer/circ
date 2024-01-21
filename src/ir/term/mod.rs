@@ -1277,28 +1277,29 @@ const LEN_DECAY_NUM: usize = 15;
 const LEN_DECAY_DEN: usize = 16;
 /// Scan term and type databases only if they've grown in size since last scan
 pub fn maybe_garbage_collect() -> bool {
-    // Don't garbage collect while panicking.
-    // NOTE This function probably shouldn't be called from Drop impls, but let's be safe anyway.
-    if std::thread::panicking() {
-        log::warn!("Not garbage collecting because we are currently panicking.");
-        return false;
-    }
+    //// Don't garbage collect while panicking.
+    //// NOTE This function probably shouldn't be called from Drop impls, but let's be safe anyway.
+    //if std::thread::panicking() {
+    //    log::warn!("Not garbage collecting because we are currently panicking.");
+    //    return false;
+    //}
 
-    // lock the collector before locking anything else
-    let _lock = COLLECT.write().unwrap();
-    let mut ran = false;
-    {
-        let mut term_table = TERMS.write().unwrap();
-        if term_table.should_collect() {
-            term_table.collect();
-            ran = true;
-        }
-    } // TERMS lock goes out of scope here
-    if ran {
-        collect_types();
-        super::opt::cfold::collect();
-    }
-    ran
+    //// lock the collector before locking anything else
+    //let _lock = COLLECT.write().unwrap();
+    //let mut ran = false;
+    //{
+    //    let mut term_table = TERMS.write().unwrap();
+    //    if term_table.should_collect() {
+    //        term_table.collect();
+    //        ran = true;
+    //    }
+    //} // TERMS lock goes out of scope here
+    //if ran {
+    //    collect_types();
+    //    super::opt::cfold::collect();
+    //}
+    //ran
+    return false;
 }
 
 fn collect_terms() {
